@@ -1,0 +1,5 @@
+requests
+pandas
+flask
+flask-cors
+gunicorn
