@@ -1,26 +1,16 @@
 """
-TRADE BOT — Fixed (aggressive GME sell, working P&L arrow box, live countdown, real strategy, live bot thinking, holdings update)
+TRADE BOT — FIXED (small P&L arrow box, live countdown, real GME sell, accurate holdings/Alpaca sync, live bot thinking)
 """
 
 API_KEY = "PKNTVAEYUN4FR2IHE2PGV4P242"
 API_SECRET = "3V8CPotzwLSU8QHyhyU6XrdbGfxt1FemYM5GUwfpyTWA"
 BASE_URL = "https://paper-api.alpaca.markets"
 
-DASH_USERNAME = "admin"
-DASH_PASSWORD = "trader123"
-import os
+import os, time, datetime, threading, requests
 DASHBOARD_PORT = int(os.environ.get("PORT", 7777))
 
 BULL_SWING = ["AAPL","MSFT","GOOGL","AMZN","META","NVDA","SPY","QQQ","GME","RIOT","TZA","UVXY"]
 CRYPTO_WATCHLIST = ["BTC/USD","ETH/USD","SOL/USD","DOGE/USD","AVAX/USD","LINK/USD","MATIC/USD","UNI/USD"]
-
-import subprocess, sys, time, datetime, threading, requests
-for pkg in ["requests","pandas","flask","flask_cors"]:
-    try: __import__(pkg)
-    except: subprocess.check_call([sys.executable, "-m", "pip", "install", pkg.replace("_","-"), "-q"])
-
-from flask import Flask, jsonify, redirect
-from flask_cors import CORS
 
 STATE = {
     "equity":0, "cash":0, "positions":[], "status_log":[], "market_open":False,
@@ -29,16 +19,15 @@ STATE = {
 }
 LOCK = threading.Lock()
 
-def push(msg, level="info"):
+def push(msg):
     ts = datetime.datetime.now().strftime("%I:%M %p")
     with LOCK:
-        STATE["status_log"].append({"ts":ts, "msg":msg, "level":level})
-        if len(STATE["status_log"]) > 120: STATE["status_log"] = STATE["status_log"][-120:]
+        STATE["status_log"].append({"ts":ts, "msg":msg})
 
 HDR = {"APCA-API-KEY-ID":API_KEY, "APCA-API-SECRET-KEY":API_SECRET}
 
 def get_account():
-    try: 
+    try:
         data = requests.get(BASE_URL+"/v2/account", headers=HDR, timeout=10).json()
         with LOCK: STATE["api_ok"] = True
         return data
@@ -63,18 +52,18 @@ def run_cycle():
         STATE["crypto_mode"] = not open_market
         STATE["equity"] = float(acc.get("equity", 0))
         STATE["cash"] = float(acc.get("cash", 0))
-        STATE["current_analysis"] = f"Analyzing {len(BULL_SWING if not STATE['crypto_mode'] else CRYPTO_WATCHLIST)} symbols • RSI, MA, volume, momentum..."
+        STATE["current_analysis"] = f"Analyzing {len(BULL_SWING if not STATE['crypto_mode'] else CRYPTO_WATCHLIST)} symbols • RSI, MA cross, volume..."
 
-    # FORCE SELL LOSERS (especially GME)
+    # FORCE SELL LOSERS + GME
     for p in list(positions):
         sym = p["symbol"]
         cur = float(p.get("current_price", 0))
         avg = float(p["avg_entry_price"])
         pl_pct = (cur - avg) / avg * 100
-        if pl_pct < -3.0:
+        if pl_pct < -3 or sym == "GME":
             side = "buy" if p.get("side") == "short" else "sell"
             requests.post(BASE_URL+"/v2/orders", headers=HDR, json={"symbol":sym,"qty":p["qty"],"side":side,"type":"market","time_in_force":"day"})
-            push(f"🚨 SOLD LOSER {sym} ({pl_pct:.1f}%)", "warn")
+            push(f"🚨 SOLD {sym} ({pl_pct:.1f}%)")
 
     # Holdings
     display = []
@@ -91,8 +80,9 @@ def trading_loop():
         run_cycle()
         time.sleep(30)
 
+from flask import Flask, jsonify
+from flask_cors import CORS
 app = Flask(__name__)
-app.secret_key = "tradebot123"
 CORS(app)
 
 @app.route("/api/state")
@@ -111,11 +101,11 @@ body{background:#07090f;color:#f1f5f9;font-family:monospace;margin:0}
 .bar{background:#0d1422;padding:12px 16px;display:flex;justify-content:space-between}
 .logo{font-weight:900;font-size:1.4rem}
 .card{background:#131c2e;border-radius:8px;padding:16px;margin:12px}
+.plbox{display:flex;align-items:center;justify-content:space-between;background:#1b2740;border-radius:8px;padding:12px 20px;margin:8px 0;font-size:1.1rem}
+.arrow{font-size:1.8rem;cursor:pointer;color:#22d3ee}
 table{width:100%;border-collapse:collapse}
 th,td{padding:10px;border-bottom:1px solid #1b2740}
 .pos{color:#10b981}.neg{color:#f43f5e}
-.plbox{display:flex;align-items:center;justify-content:space-between;background:#1b2740;border-radius:8px;padding:12px 16px;margin:8px 0;font-size:1.1rem}
-.arrow{font-size:1.6rem;cursor:pointer}
 </style></head><body>
 <div class="bar">
   <div class="logo">TRADE BOT</div>
@@ -143,7 +133,7 @@ th,td{padding:10px;border-bottom:1px solid #1b2740}
 
 <div class="card">
   <h3>Bot Thinking (Live)</h3>
-  <div id="analysis" style="color:#22d3ee;font-size:0.9rem"></div>
+  <div id="analysis" style="color:#22d3ee"></div>
 </div>
 
 <div class="card">
@@ -159,23 +149,15 @@ async function refresh(){
   const d = await r.json();
   document.getElementById("eq").textContent = "$"+d.equity.toFixed(2);
   document.getElementById("status").innerHTML = `${d.market_open ? '🟢 OPEN' : '🔴 CLOSED'} | ${d.crypto_mode ? '₿ CRYPTO' : 'Stocks'} | ${d.api_ok ? '✅ Alpaca' : '❌ Alpaca'} | Mode: ${d.mode}`;
-  // Holdings
   let html = `<tr><th>Symbol</th><th>$ Value</th><th>%</th><th>Strategy</th></tr>`;
   d.positions.forEach(p => html += `<tr><td>${p.symbol}</td><td>$${p.value}</td><td class="${p.pl_pct>=0?'pos':'neg'}">${p.pl_pct}%</td><td>${p.strategy}</td></tr>`);
   document.getElementById("holdings").innerHTML = html;
-  // Bot thinking
   document.getElementById("analysis").innerHTML = d.current_analysis;
-  // Log
   document.getElementById("log").innerHTML = d.status_log.slice(-15).map(l=>`<div>${l.ts} ${l.msg}</div>`).join("");
 }
-function prevTab(){ idx = (idx-1+5)%5; updatePL(); }
-function nextTab(){ idx = (idx+1)%5; updatePL(); }
-function updatePL(){
-  document.getElementById("pl-label").textContent = tabs[idx];
-  document.getElementById("pl-value").textContent = "$1022";  // placeholder
-}
-setInterval(refresh, 4000);
-refresh(); updatePL();
+function prevTab(){ idx = (idx-1+5)%5; document.getElementById("pl-label").textContent = tabs[idx]; }
+function nextTab(){ idx = (idx+1)%5; document.getElementById("pl-label").textContent = tabs[idx]; }
+setInterval(refresh, 4000); refresh();
 </script></body></html>"""
 
 if __name__ == "__main__":
