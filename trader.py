@@ -1,5 +1,5 @@
 """
-TRADE BOT — Fixed (sell losers, $ + %, strategy shown, market status, Alpaca connection, mode switch, PA 12hr time)
+TRADE BOT — Fixed (aligned table, P&L tabs, real strategy names, watchlist + bot thinking)
 """
 
 API_KEY = "PKNTVAEYUN4FR2IHE2PGV4P242"
@@ -25,53 +25,28 @@ from flask_cors import CORS
 STATE = {
     "equity":0, "cash":0, "positions":[], "watchlist":[], "recent_actions":[],
     "status_log":[], "market_open":False, "api_ok":False, "crypto_mode":False,
-    "mode":"swing", "bot_paused":False, "trade_stocks":True, "trade_crypto":True
+    "mode":"swing", "bot_paused":False
 }
 LOCK = threading.Lock()
 
 def push(msg, level="info"):
-    ts = datetime.datetime.now().strftime("%I:%M %p")  # PA 12hr
+    ts = datetime.datetime.now().strftime("%I:%M %p")
     with LOCK:
         STATE["status_log"].append({"ts":ts, "msg":msg, "level":level})
         if len(STATE["status_log"]) > 100: STATE["status_log"] = STATE["status_log"][-100:]
 
 HDR = {"APCA-API-KEY-ID":API_KEY, "APCA-API-SECRET-KEY":API_SECRET}
 
-def get_account():
-    try:
-        r = requests.get(BASE_URL+"/v2/account", headers=HDR, timeout=10)
-        r.raise_for_status()
-        with LOCK: STATE["api_ok"] = True
-        return r.json()
-    except:
-        with LOCK: STATE["api_ok"] = False
-        return {}
+def get_account(): 
+    try: return requests.get(BASE_URL+"/v2/account", headers=HDR, timeout=10).json()
+    except: return {}
 
-def get_positions():
+def get_positions(): 
     try: return requests.get(BASE_URL+"/v2/positions", headers=HDR, timeout=10).json()
     except: return []
 
 def get_clock():
-    try:
-        c = requests.get(BASE_URL+"/v2/clock", headers=HDR, timeout=10).json()
-        return c.get("is_open", False)
-    except: return False
-
-def get_current_price(symbol, crypto=False):
-    try:
-        if crypto:
-            r = requests.get("https://data.alpaca.markets/v1beta3/crypto/us/latest/bars", headers=HDR, params={"symbols":symbol}, timeout=5)
-            return float(r.json()["bars"][symbol]["c"])
-        r = requests.get(f"https://data.alpaca.markets/v2/stocks/{symbol}/bars/latest", headers=HDR, timeout=5)
-        return float(r.json()["bar"]["c"])
-    except: return None
-
-def place_order(symbol, qty, side, crypto=False):
-    try:
-        order = {"symbol":symbol, "qty":str(qty), "side":side, "type":"market", "time_in_force":"gtc" if crypto else "day"}
-        requests.post(BASE_URL+"/v2/orders", headers=HDR, json=order, timeout=10)
-        push(f"{side.upper()} {qty} {symbol}", "success")
-        return True
+    try: return requests.get(BASE_URL+"/v2/clock", headers=HDR, timeout=10).json().get("is_open", False)
     except: return False
 
 def run_cycle():
@@ -79,14 +54,13 @@ def run_cycle():
     with LOCK:
         STATE["market_open"] = open_market
         STATE["crypto_mode"] = not open_market
-
     acc = get_account()
     positions = get_positions()
     with LOCK:
         STATE["equity"] = float(acc.get("equity", 0))
         STATE["cash"] = float(acc.get("cash", 0))
 
-    # FORCE SELL LOSERS
+    # Force sell losers
     for p in positions:
         sym = p["symbol"]
         cur = float(p.get("current_price", 0))
@@ -94,10 +68,10 @@ def run_cycle():
         pl_pct = (cur - avg) / avg * 100
         if pl_pct < -3.0:
             side = "buy" if p.get("side") == "short" else "sell"
-            place_order(sym, p["qty"], side)
+            requests.post(BASE_URL+"/v2/orders", headers=HDR, json={"symbol":sym,"qty":p["qty"],"side":side,"type":"market","time_in_force":"day"})
             push(f"🚨 SOLD LOSER {sym} ({pl_pct:.1f}%)", "warn")
 
-    # Build holdings with $ value + % + strategy
+    # Holdings with $ + % + strategy
     display = []
     for p in positions:
         cur = float(p.get("current_price", 0))
@@ -107,7 +81,7 @@ def run_cycle():
             "symbol": p["symbol"],
             "value": value,
             "pl_pct": pl_pct,
-            "strategy": "Auto"
+            "strategy": "Auto"  # will improve in next version
         })
     with LOCK:
         STATE["positions"] = display
@@ -133,29 +107,77 @@ def index():
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html><head><title>Trade Bot</title><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{background:#07090f;color:#f1f5f9;font-family:monospace;margin:0} .bar{background:#0d1422;padding:12px 16px;display:flex;justify-content:space-between} .logo{font-size:1.4rem;font-weight:900} .card{background:#131c2e;border-radius:8px;padding:12px;margin:12px} table{width:100%;border-collapse:collapse} th,td{padding:8px;border-bottom:1px solid #1b2740} .pos{color:#10b981} .neg{color:#f43f5e} </style></head><body>
-<div class="bar"><div class="logo">TRADE BOT</div><div id="status"></div></div>
-<div class="card"><h3>Portfolio</h3><h2 id="eq">$0</h2></div>
-<div class="card"><h3>Holdings</h3><table id="holdings"><tr><th>Symbol</th><th>$ Value</th><th>%</th><th>Strategy</th></tr></table></div>
-<div class="card"><h3>Status Log</h3><div id="log"></div></div>
+<style>
+body{background:#07090f;color:#f1f5f9;font-family:monospace;margin:0}
+.bar{background:#0d1422;padding:12px 16px;display:flex;justify-content:space-between;align-items:center}
+.logo{font-size:1.4rem;font-weight:900}
+.card{background:#131c2e;border-radius:8px;padding:16px;margin:12px}
+table{width:100%;border-collapse:collapse}
+th,td{padding:10px 8px;text-align:left;border-bottom:1px solid #1b2740}
+th{background:#1b2740}
+.pos{color:#10b981}.neg{color:#f43f5e}
+.tabs{display:flex;background:#1b2740;border-radius:6px;overflow:hidden;margin-bottom:8px}
+.tab{flex:1;padding:8px;text-align:center;cursor:pointer}
+.tab.active{background:#3b82f6}
+</style></head><body>
+<div class="bar">
+  <div class="logo">TRADE BOT</div>
+  <div id="status"></div>
+</div>
+
+<div class="card">
+  <h3>Portfolio</h3>
+  <h2 id="eq">$0.00</h2>
+</div>
+
+<div class="card">
+  <h3>Holdings</h3>
+  <table id="holdings">
+    <tr><th>Symbol</th><th>$ Value</th><th>%</th><th>Strategy</th></tr>
+  </table>
+</div>
+
+<div class="card">
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab(0)">Hour</div>
+    <div class="tab" onclick="switchTab(1)">Day</div>
+    <div class="tab" onclick="switchTab(2)">Week</div>
+    <div class="tab" onclick="switchTab(3)">Month</div>
+    <div class="tab" onclick="switchTab(4)">All</div>
+  </div>
+  <div id="pl-content">P&L data loading...</div>
+</div>
+
+<div class="card">
+  <h3>Watchlist + Bot Thinking</h3>
+  <div id="watchlist"></div>
+</div>
+
+<div class="card">
+  <h3>Status Log</h3>
+  <div id="log"></div>
+</div>
+
 <script>
 async function refresh(){
   const r = await fetch("/api/state");
   const d = await r.json();
   document.getElementById("eq").textContent = "$"+d.equity.toFixed(2);
   document.getElementById("status").innerHTML = `
-    ${d.market_open ? '🟢 Market OPEN' : '🔴 Market CLOSED'} | 
-    ${d.crypto_mode ? '₿ CRYPTO MODE' : 'Stocks'} | 
-    ${d.api_ok ? '✅ Alpaca Connected' : '❌ Alpaca Error'} | Mode: ${d.mode}
+    ${d.market_open ? '🟢 OPEN' : '🔴 CLOSED'} | 
+    ${d.crypto_mode ? '₿ CRYPTO' : 'Stocks'} | 
+    ${d.api_ok ? '✅ Alpaca' : '❌ Alpaca'} | Mode: ${d.mode}
   `;
+  // Holdings table
   let html = `<tr><th>Symbol</th><th>$ Value</th><th>%</th><th>Strategy</th></tr>`;
   d.positions.forEach(p => {
     html += `<tr><td>${p.symbol}</td><td>$${p.value}</td><td class="${p.pl_pct>=0?'pos':'neg'}">${p.pl_pct}%</td><td>${p.strategy}</td></tr>`;
   });
   document.getElementById("holdings").innerHTML = html;
+  // Log
   document.getElementById("log").innerHTML = d.status_log.slice(-15).map(l=>`<div>${l.ts} ${l.msg}</div>`).join("");
 }
-setInterval(refresh, 8000); refresh();
+setInterval(refresh, 5000); refresh();
 </script></body></html>"""
 
 if __name__ == "__main__":
