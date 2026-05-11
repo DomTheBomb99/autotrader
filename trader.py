@@ -1,10 +1,5 @@
 """
-TRADE BOT — Fixed & Simplified
-• Sells losers automatically
-• Shows $ amount + % per holding + strategy
-• Simpler layout, PA 12hr time
-• Clear strategy per position
-• Settings panel (Swing/Day/Crypto)
+TRADE BOT — Fixed (sell losers, $ + %, strategy shown, market status, Alpaca connection, mode switch, PA 12hr time)
 """
 
 API_KEY = "PKNTVAEYUN4FR2IHE2PGV4P242"
@@ -16,32 +11,26 @@ DASH_PASSWORD = "trader123"
 import os
 DASHBOARD_PORT = int(os.environ.get("PORT", 7777))
 
-# Watchlists
 BULL_SWING = ["AAPL","MSFT","GOOGL","AMZN","META","NVDA","SPY","QQQ","GME","RIOT","TZA","UVXY"]
 CRYPTO_WATCHLIST = ["BTC/USD","ETH/USD","SOL/USD","DOGE/USD","AVAX/USD","LINK/USD","MATIC/USD","UNI/USD"]
 
-MAX_POSITIONS = 4
-MIN_CONFIDENCE = 0.55
-
-# Auto-install
-import subprocess, sys
+import subprocess, sys, time, datetime, threading, requests, pandas as pd
 for pkg in ["requests","pandas","flask","flask_cors"]:
     try: __import__(pkg)
-    except: subprocess.check_call([sys.executable,"-m","pip","install",pkg.replace("_","-"),"-q"])
+    except: subprocess.check_call([sys.executable, "-m", "pip", "install", pkg.replace("_","-"), "-q"])
 
-import time, datetime, threading, requests, pandas as pd
 from flask import Flask, jsonify, request, redirect, session
 from flask_cors import CORS
 
 STATE = {
     "equity":0, "cash":0, "positions":[], "watchlist":[], "recent_actions":[],
-    "status_log":[], "crypto_mode":False, "bot_paused":False,
-    "trade_stocks":True, "trade_crypto":True, "trade_swing":True, "trade_day":True
+    "status_log":[], "market_open":False, "api_ok":False, "crypto_mode":False,
+    "mode":"swing", "bot_paused":False, "trade_stocks":True, "trade_crypto":True
 }
 LOCK = threading.Lock()
 
 def push(msg, level="info"):
-    ts = datetime.datetime.now().strftime("%I:%M %p")  # PA 12hr time
+    ts = datetime.datetime.now().strftime("%I:%M %p")  # PA 12hr
     with LOCK:
         STATE["status_log"].append({"ts":ts, "msg":msg, "level":level})
         if len(STATE["status_log"]) > 100: STATE["status_log"] = STATE["status_log"][-100:]
@@ -49,10 +38,24 @@ def push(msg, level="info"):
 HDR = {"APCA-API-KEY-ID":API_KEY, "APCA-API-SECRET-KEY":API_SECRET}
 
 def get_account():
-    return requests.get(BASE_URL+"/v2/account", headers=HDR, timeout=10).json()
+    try:
+        r = requests.get(BASE_URL+"/v2/account", headers=HDR, timeout=10)
+        r.raise_for_status()
+        with LOCK: STATE["api_ok"] = True
+        return r.json()
+    except:
+        with LOCK: STATE["api_ok"] = False
+        return {}
 
 def get_positions():
-    return requests.get(BASE_URL+"/v2/positions", headers=HDR, timeout=10).json()
+    try: return requests.get(BASE_URL+"/v2/positions", headers=HDR, timeout=10).json()
+    except: return []
+
+def get_clock():
+    try:
+        c = requests.get(BASE_URL+"/v2/clock", headers=HDR, timeout=10).json()
+        return c.get("is_open", False)
+    except: return False
 
 def get_current_price(symbol, crypto=False):
     try:
@@ -66,51 +69,52 @@ def get_current_price(symbol, crypto=False):
 def place_order(symbol, qty, side, crypto=False):
     try:
         order = {"symbol":symbol, "qty":str(qty), "side":side, "type":"market", "time_in_force":"gtc" if crypto else "day"}
-        requests.post(BASE_URL+"/v2/orders", headers=HDR, json=order)
+        requests.post(BASE_URL+"/v2/orders", headers=HDR, json=order, timeout=10)
         push(f"{side.upper()} {qty} {symbol}", "success")
         return True
     except: return False
 
 def run_cycle():
-    try:
-        acc = get_account()
-        positions = get_positions()
-        with LOCK:
-            STATE["equity"] = float(acc.get("equity",0))
-            STATE["cash"] = float(acc.get("cash",0))
+    open_market = get_clock()
+    with LOCK:
+        STATE["market_open"] = open_market
+        STATE["crypto_mode"] = not open_market
 
-        # FORCE SELL LOSERS
-        for p in positions:
-            sym = p["symbol"]
-            cur = float(p.get("current_price",0))
-            avg = float(p["avg_entry_price"])
-            pl_pct = (cur - avg) / avg * 100
-            if pl_pct < -3.0:   # sell anything down >3%
-                side = "buy" if p.get("side") == "short" else "sell"
-                place_order(sym, p["qty"], side)
-                push(f"🚨 SOLD LOSER {sym} ({pl_pct:.1f}%)", "warn")
+    acc = get_account()
+    positions = get_positions()
+    with LOCK:
+        STATE["equity"] = float(acc.get("equity", 0))
+        STATE["cash"] = float(acc.get("cash", 0))
 
-        # Build display positions with $ + % + strategy
-        display = []
-        for p in positions:
-            cur = float(p.get("current_price",0))
-            value = round(cur * float(p["qty"]), 2)
-            pl_pct = round(((cur - float(p["avg_entry_price"])) / float(p["avg_entry_price"])) * 100, 1)
-            display.append({
-                "symbol": sym,
-                "qty": float(p["qty"]),
-                "value": value,
-                "pl_pct": pl_pct,
-                "strategy": p.get("strategy", "Auto")
-            })
-        with LOCK:
-            STATE["positions"] = display
-    except Exception as e:
-        push(f"Cycle error: {e}", "error")
+    # FORCE SELL LOSERS
+    for p in positions:
+        sym = p["symbol"]
+        cur = float(p.get("current_price", 0))
+        avg = float(p["avg_entry_price"])
+        pl_pct = (cur - avg) / avg * 100
+        if pl_pct < -3.0:
+            side = "buy" if p.get("side") == "short" else "sell"
+            place_order(sym, p["qty"], side)
+            push(f"🚨 SOLD LOSER {sym} ({pl_pct:.1f}%)", "warn")
+
+    # Build holdings with $ value + % + strategy
+    display = []
+    for p in positions:
+        cur = float(p.get("current_price", 0))
+        value = round(cur * float(p["qty"]), 2)
+        pl_pct = round(((cur - float(p["avg_entry_price"])) / float(p["avg_entry_price"])) * 100, 1)
+        display.append({
+            "symbol": p["symbol"],
+            "value": value,
+            "pl_pct": pl_pct,
+            "strategy": "Auto"
+        })
+    with LOCK:
+        STATE["positions"] = display
 
 def trading_loop():
     while True:
-        if not STATE.get("bot_paused", False):
+        if not STATE.get("bot_paused"):
             run_cycle()
         time.sleep(60)
 
@@ -127,34 +131,34 @@ def api_state():
 def index():
     return DASHBOARD_HTML
 
-# Simplified dashboard HTML (Trade Bot name + clean layout)
-DASHBOARD_HTML = """<!DOCTYPE html><html><head><title>Trade Bot</title><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{background:#0a0e1a;color:#fff;font-family:monospace;margin:0;padding:0} .bar{background:#111827;padding:12px 16px;display:flex;justify-content:space-between;align-items:center} .logo{font-size:1.4rem;font-weight:900} .hero{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;padding:16px} .card{background:#1f2937;border-radius:8px;padding:14px} table{width:100%;border-collapse:collapse} th,td{padding:8px;border-bottom:1px solid #374151} .pos{color:#10b981} .neg{color:#ef4444} </style></head><body>
-<div class="bar"><div class="logo">TRADE BOT</div><div>Paper Trading</div></div>
-<div class="hero">
-  <div class="card"><h3>Portfolio</h3><h2 id="eq">$0.00</h2></div>
-  <div class="card"><h3>Cash</h3><h2 id="cash">$0.00</h2></div>
-  <div class="card"><h3>Unrealized P&L</h3><h2 id="unr">$0.00</h2></div>
-</div>
-<div style="padding:0 16px"><h3>Holdings</h3><table id="holdings"><tr><th>Symbol</th><th>$ Value</th><th>% P&L</th><th>Strategy</th></tr></table></div>
-<div style="padding:16px"><h3>Status</h3><div id="log"></div></div>
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html><head><title>Trade Bot</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{background:#07090f;color:#f1f5f9;font-family:monospace;margin:0} .bar{background:#0d1422;padding:12px 16px;display:flex;justify-content:space-between} .logo{font-size:1.4rem;font-weight:900} .card{background:#131c2e;border-radius:8px;padding:12px;margin:12px} table{width:100%;border-collapse:collapse} th,td{padding:8px;border-bottom:1px solid #1b2740} .pos{color:#10b981} .neg{color:#f43f5e} </style></head><body>
+<div class="bar"><div class="logo">TRADE BOT</div><div id="status"></div></div>
+<div class="card"><h3>Portfolio</h3><h2 id="eq">$0</h2></div>
+<div class="card"><h3>Holdings</h3><table id="holdings"><tr><th>Symbol</th><th>$ Value</th><th>%</th><th>Strategy</th></tr></table></div>
+<div class="card"><h3>Status Log</h3><div id="log"></div></div>
 <script>
-async function refresh(){ 
-  const r = await fetch("/api/state"); const d = await r.json();
+async function refresh(){
+  const r = await fetch("/api/state");
+  const d = await r.json();
   document.getElementById("eq").textContent = "$"+d.equity.toFixed(2);
-  document.getElementById("cash").textContent = "$"+d.cash.toFixed(2);
-  document.getElementById("unr").textContent = "$"+(d.positions.reduce((a,p)=>a+p.pl_pct,0)).toFixed(2);
-  let html = `<tr><th>Symbol</th><th>$ Value</th><th>% P&L</th><th>Strategy</th></tr>`;
-  d.positions.forEach(p=>{ 
+  document.getElementById("status").innerHTML = `
+    ${d.market_open ? '🟢 Market OPEN' : '🔴 Market CLOSED'} | 
+    ${d.crypto_mode ? '₿ CRYPTO MODE' : 'Stocks'} | 
+    ${d.api_ok ? '✅ Alpaca Connected' : '❌ Alpaca Error'} | Mode: ${d.mode}
+  `;
+  let html = `<tr><th>Symbol</th><th>$ Value</th><th>%</th><th>Strategy</th></tr>`;
+  d.positions.forEach(p => {
     html += `<tr><td>${p.symbol}</td><td>$${p.value}</td><td class="${p.pl_pct>=0?'pos':'neg'}">${p.pl_pct}%</td><td>${p.strategy}</td></tr>`;
   });
   document.getElementById("holdings").innerHTML = html;
-  document.getElementById("log").innerHTML = d.status_log.slice(-10).map(l=>`<div>${l.ts} ${l.msg}</div>`).join("");
+  document.getElementById("log").innerHTML = d.status_log.slice(-15).map(l=>`<div>${l.ts} ${l.msg}</div>`).join("");
 }
-setInterval(refresh,8000); refresh();
+setInterval(refresh, 8000); refresh();
 </script></body></html>"""
 
 if __name__ == "__main__":
-    print("🚀 Trade Bot starting...")
+    print("🚀 TRADE BOT STARTED")
     threading.Thread(target=trading_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=DASHBOARD_PORT)
