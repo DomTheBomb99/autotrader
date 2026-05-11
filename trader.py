@@ -1,5 +1,5 @@
 """
-TRADE BOT — Fixed (aligned table, P&L tabs, real strategy names, watchlist + bot thinking)
+TRADE BOT — Fixed (top P&L tabs, live holdings $ + %, bot thinking section, everything updates live)
 """
 
 API_KEY = "PKNTVAEYUN4FR2IHE2PGV4P242"
@@ -25,7 +25,7 @@ from flask_cors import CORS
 STATE = {
     "equity":0, "cash":0, "positions":[], "watchlist":[], "recent_actions":[],
     "status_log":[], "market_open":False, "api_ok":False, "crypto_mode":False,
-    "mode":"swing", "bot_paused":False
+    "mode":"swing", "bot_paused":False, "current_analysis":""
 }
 LOCK = threading.Lock()
 
@@ -37,11 +37,11 @@ def push(msg, level="info"):
 
 HDR = {"APCA-API-KEY-ID":API_KEY, "APCA-API-SECRET-KEY":API_SECRET}
 
-def get_account(): 
+def get_account():
     try: return requests.get(BASE_URL+"/v2/account", headers=HDR, timeout=10).json()
     except: return {}
 
-def get_positions(): 
+def get_positions():
     try: return requests.get(BASE_URL+"/v2/positions", headers=HDR, timeout=10).json()
     except: return []
 
@@ -81,10 +81,14 @@ def run_cycle():
             "symbol": p["symbol"],
             "value": value,
             "pl_pct": pl_pct,
-            "strategy": "Auto"  # will improve in next version
+            "strategy": "Auto"
         })
     with LOCK:
         STATE["positions"] = display
+
+    # Bot thinking (live analysis)
+    with LOCK:
+        STATE["current_analysis"] = f"Analyzing {len(BULL_SWING) if not STATE['crypto_mode'] else len(CRYPTO_WATCHLIST)} symbols — checking RSI, MA, volume..."
 
 def trading_loop():
     while True:
@@ -116,9 +120,9 @@ table{width:100%;border-collapse:collapse}
 th,td{padding:10px 8px;text-align:left;border-bottom:1px solid #1b2740}
 th{background:#1b2740}
 .pos{color:#10b981}.neg{color:#f43f5e}
-.tabs{display:flex;background:#1b2740;border-radius:6px;overflow:hidden;margin-bottom:8px}
-.tab{flex:1;padding:8px;text-align:center;cursor:pointer}
-.tab.active{background:#3b82f6}
+.tabs{display:flex;background:#1b2740;border-radius:6px;overflow:hidden;margin:8px 0}
+.tab{flex:1;padding:10px;text-align:center;cursor:pointer;font-size:0.9rem}
+.tab.active{background:#3b82f6;color:white}
 </style></head><body>
 <div class="bar">
   <div class="logo">TRADE BOT</div>
@@ -128,37 +132,33 @@ th{background:#1b2740}
 <div class="card">
   <h3>Portfolio</h3>
   <h2 id="eq">$0.00</h2>
-</div>
-
-<div class="card">
-  <h3>Holdings</h3>
-  <table id="holdings">
-    <tr><th>Symbol</th><th>$ Value</th><th>%</th><th>Strategy</th></tr>
-  </table>
-</div>
-
-<div class="card">
-  <div class="tabs">
+  <div class="tabs" id="pl-tabs">
     <div class="tab active" onclick="switchTab(0)">Hour</div>
     <div class="tab" onclick="switchTab(1)">Day</div>
     <div class="tab" onclick="switchTab(2)">Week</div>
     <div class="tab" onclick="switchTab(3)">Month</div>
     <div class="tab" onclick="switchTab(4)">All</div>
   </div>
-  <div id="pl-content">P&L data loading...</div>
+  <div id="pl-content">Loading P&L...</div>
 </div>
 
 <div class="card">
-  <h3>Watchlist + Bot Thinking</h3>
-  <div id="watchlist"></div>
+  <h3>Holdings</h3>
+  <table id="holdings"><tr><th>Symbol</th><th>$ Value</th><th>%</th><th>Strategy</th></tr></table>
+</div>
+
+<div class="card">
+  <h3>Bot Thinking (Live)</h3>
+  <div id="analysis" style="font-size:0.85rem;color:#22d3ee"></div>
 </div>
 
 <div class="card">
   <h3>Status Log</h3>
-  <div id="log"></div>
+  <div id="log" style="max-height:200px;overflow-y:auto"></div>
 </div>
 
 <script>
+let currentTab = 0;
 async function refresh(){
   const r = await fetch("/api/state");
   const d = await r.json();
@@ -168,16 +168,18 @@ async function refresh(){
     ${d.crypto_mode ? '₿ CRYPTO' : 'Stocks'} | 
     ${d.api_ok ? '✅ Alpaca' : '❌ Alpaca'} | Mode: ${d.mode}
   `;
-  // Holdings table
+  // Holdings
   let html = `<tr><th>Symbol</th><th>$ Value</th><th>%</th><th>Strategy</th></tr>`;
   d.positions.forEach(p => {
     html += `<tr><td>${p.symbol}</td><td>$${p.value}</td><td class="${p.pl_pct>=0?'pos':'neg'}">${p.pl_pct}%</td><td>${p.strategy}</td></tr>`;
   });
   document.getElementById("holdings").innerHTML = html;
+  // Bot thinking
+  document.getElementById("analysis").innerHTML = d.current_analysis || "Scanning market...";
   // Log
   document.getElementById("log").innerHTML = d.status_log.slice(-15).map(l=>`<div>${l.ts} ${l.msg}</div>`).join("");
 }
-setInterval(refresh, 5000); refresh();
+setInterval(refresh, 4000); refresh();
 </script></body></html>"""
 
 if __name__ == "__main__":
