@@ -1,7 +1,3 @@
-**Here is the full fixed `trader.py`.**  
-Replace **everything** in your GitHub `trader.py` with this code, commit, and Railway will update automatically.
-
-```python
 """
 TRADE BOT — Fixed & Simplified
 • Sells losers automatically
@@ -162,10 +158,3 @@ if __name__ == "__main__":
     print("🚀 Trade Bot starting...")
     threading.Thread(target=trading_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=DASHBOARD_PORT)
-```
-
-**Next step:**  
-Go to GitHub → edit `trader.py` → paste the whole thing above → commit.  
-Railway will redeploy in ~1 minute.
-
-Let me know when it's live and what still needs tweaking.
