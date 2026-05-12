@@ -4,17 +4,15 @@ import threading
 import requests
 import numpy as np
 import pandas as pd
-
 from flask import Flask
 from flask_socketio import SocketIO
+from plyer import notification
 
 # =========================================================
 # CONFIG
 # =========================================================
-
 API_KEY = os.environ.get("ALPACA_API_KEY", "YOUR_KEY")
 API_SECRET = os.environ.get("ALPACA_API_SECRET", "YOUR_SECRET")
-
 BASE_URL = "https://paper-api.alpaca.markets"
 DATA_URL = "https://data.alpaca.markets/v2"
 
@@ -25,39 +23,46 @@ HEADERS = {
 
 PORT = int(os.environ.get("PORT", 7777))
 
-# =========================================================
-# APP
-# =========================================================
-
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # =========================================================
 # STATE
 # =========================================================
-
 bot = {
     "running": True,
     "watchlist": ["AAPL","TSLA","NVDA","AMD","SPY","QQQ","META","AMZN"],
+    "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+    "last_summary_date": ""
 }
 
 last_actions = []
 
 # =========================================================
-# ALPACA
+# NOTIFICATIONS & HELPERS
 # =========================================================
+def send_desktop_notify(title, message):
+    try:
+        notification.notify(
+            title=title,
+            message=message,
+            app_name='QuantumBot',
+            timeout=10
+        )
+    except:
+        pass
 
-def account():
+def get_account_data():
     r = requests.get(BASE_URL + "/v2/account", headers=HEADERS)
     return r.json() if r.status_code == 200 else {}
 
-def positions():
+def get_positions():
     r = requests.get(BASE_URL + "/v2/positions", headers=HEADERS)
     return r.json() if r.status_code == 200 else []
 
 def order(symbol, side="buy", qty=1):
     try:
-        r = requests.post(
+        res = requests.post(
             BASE_URL + "/v2/orders",
             headers=HEADERS,
             json={
@@ -68,211 +73,167 @@ def order(symbol, side="buy", qty=1):
                 "time_in_force": "gtc"
             }
         )
-        if r.status_code == 200:
-            last_actions.append(f"[{time.strftime('%H:%M:%S')}] {side.upper()} {symbol} - SUCCESS")
+        if res.status_code == 200:
+            msg = f"{side.upper()} {symbol} (1 Qty)"
+            last_actions.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+            send_desktop_notify("Trade Executed", msg)
         else:
-            last_actions.append(f"[{time.strftime('%H:%M:%S')}] {side.upper()} {symbol} - FAILED")
-
+            last_actions.append(f"ORDER FAILED: {symbol}")
     except Exception as e:
-        last_actions.append(f"ORDER ERROR: {str(e)}")
+        last_actions.append(f"ERROR: {str(e)}")
 
 # =========================================================
-# MARKET DATA
+# SIGNAL ENGINE (YOUR ORIGINAL ML LOGIC GOES HERE)
 # =========================================================
-
 def get_bars(symbol):
-    r = requests.get(
-        f"{DATA_URL}/stocks/{symbol}/bars",
-        headers=HEADERS,
-        params={"timeframe": "1Min", "limit": 50}
-    )
-
-    if r.status_code != 200:
-        return None
-
+    # This detects if it's crypto or stock and hits the right Alpaca endpoint
+    url = f"{DATA_URL}/stocks/{symbol}/bars"
+    if "/" in symbol:
+        url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars"
+        
+    r = requests.get(url, headers=HEADERS, params={"timeframe": "1Min", "limit": 50})
+    if r.status_code != 200: return None
     data = r.json().get("bars", [])
     return pd.DataFrame(data) if data else None
 
-# =========================================================
-# TRADING ENGINE
-# =========================================================
+def score_symbol(symbol):
+    df = get_bars(symbol)
+    if df is None or len(df) < 20: return None
 
+    # --- YOUR ORIGINAL ML / LOGIC STARTS HERE ---
+    price = df["c"].iloc[-1]
+    trend = df["c"].iloc[-1] - df["c"].iloc[-10]
+    # (Insert any scikit-learn or complex math from your original code here)
+    score = trend 
+    # --- END ORIGINAL LOGIC ---
+
+    return {"symbol": symbol, "score": float(score), "price": float(price)}
+
+# =========================================================
+# MAIN ENGINE
+# =========================================================
 def engine():
     while True:
         if not bot["running"]:
-            time.sleep(1)
-            continue
+            time.sleep(1); continue
 
+        # Check market clock
+        clock = requests.get(BASE_URL + "/v2/clock", headers=HEADERS).json()
+        is_open = clock.get("is_open", False)
+
+        # 1. Daily Summary at Close
+        curr_time = time.strftime("%H:%M")
+        curr_date = time.strftime("%Y-%m-%d")
+        if curr_time == "16:01" and bot.get("last_summary_date") != curr_date:
+            acc = get_account_data()
+            send_desktop_notify("Market Close Summary", f"Final Equity: ${acc.get('equity', '0')}")
+            bot["last_summary_date"] = curr_date
+
+        # 2. Pick Watchlist (Crypto if closed)
+        active_list = bot["watchlist"] if is_open else bot["crypto_watchlist"]
+        
         ranked = []
-        for s in bot["watchlist"]:
-            df = get_bars(s)
-            if df is not None and len(df) >= 20:
-                price = float(df["c"].iloc[-1])
-                trend = float(df["c"].iloc[-1] - df["c"].iloc[-10])
-                ranked.append({"symbol": s, "score": trend, "price": price})
+        for s in active_list:
+            r = score_symbol(s)
+            if r: ranked.append(r)
 
         ranked.sort(key=lambda x: x["score"], reverse=True)
 
-        # Simple Logic: Buy top ranked if score > 0.5
+        # 3. Execution Logic
         for r in ranked[:1]:
             if r["score"] > 0.5:
                 order(r["symbol"], "buy", 1)
 
-        acc = account()
-        pos = positions()
-
+        # 4. Sync UI
         socketio.emit("update", {
-            "account": acc,
-            "positions": pos,
+            "account": get_account_data(),
+            "positions": get_positions(),
             "ranked": ranked,
-            "activity": last_actions[-10:][::-1] # Newest first
+            "activity": last_actions[-12:],
+            "market_status": "OPEN" if is_open else "CRYPTO MODE"
         })
-
         time.sleep(5)
 
 # =========================================================
-# UI (MODERNIZED)
+# UI (FIXED & MODERNIZED)
 # =========================================================
-
 @app.route("/")
 def home():
     return """
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <title>ALGO TERMINAL v2</title>
+    <title>QUANTUMBOT TERMINAL</title>
     <style>
-        :root { --bg: #0a0e17; --card: #161b22; --border: #30363d; --green: #238636; --red: #da3633; --text: #c9d1d9; }
-        body { margin:0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica; }
-        
-        .header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 2rem; background: var(--card); border-bottom: 1px solid var(--border); }
-        .status-dot { height: 10px; width: 10px; background-color: var(--green); border-radius: 50%; display: inline-block; margin-right: 5px; }
-        
-        .grid { display: grid; grid-template-columns: 300px 1fr 350px; gap: 1rem; padding: 1.5rem; height: calc(100vh - 100px); }
-        .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; }
-        .card-header { padding: 10px 15px; background: rgba(255,255,255,0.03); border-bottom: 1px solid var(--border); font-weight: bold; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
-        .card-body { padding: 15px; flex-grow: 1; overflow-y: auto; }
-        
-        .stat { margin-bottom: 15px; }
-        .stat-val { font-size: 24px; font-weight: 800; color: #fff; }
-        .stat-label { font-size: 11px; color: #8b949e; text-transform: uppercase; }
-
-        .item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
-        .green { color: #39d353; }
-        .red { color: #f85149; }
-        
+        :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --green: #238636; --red: #da3633; }
+        body { margin:0; background: var(--bg); color: var(--text); font-family: -apple-system, sans-serif; }
+        .header { display: flex; justify-content: space-between; padding: 15px 25px; background: var(--card); border-bottom: 1px solid var(--border); }
+        .grid { display: grid; grid-template-columns: 300px 1fr 320px; gap: 15px; padding: 15px; height: 90vh; }
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 15px; overflow-y: auto; }
+        .label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
+        .stat-val { font-size: 24px; font-weight: bold; margin: 5px 0 15px 0; }
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th { text-align: left; color: #8b949e; font-weight: 400; padding-bottom: 10px; }
-        td { padding: 8px 0; border-bottom: 1px solid var(--border); }
+        th { text-align: left; color: #8b949e; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+        td { padding: 10px 0; border-bottom: 1px solid var(--border); }
+        .green { color: #39d353; } .red { color: #f85149; }
+        .item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
     </style>
 </head>
 <body>
-
-<div class="header">
-    <div>
-        <div style="font-weight: 800; font-size: 18px;">QUANTUM<span style="color:var(--green)">BOT</span></div>
-        <div style="font-size: 11px; color: #8b949e;">CONNECTED TO ALPACA PAPER_TRADING</div>
+    <div class="header">
+        <div><b>QUANTUM</b>BOT <span id="mkt" style="margin-left:15px; font-size:12px; color:#8b949e;">SYNCING...</span></div>
+        <div id="status">● LIVE</div>
     </div>
-    <div id="connection-status"><span class="status-dot"></span> LIVE</div>
-</div>
-
-<div class="grid">
-    <!-- LEFT: ACCOUNT -->
-    <div class="card">
-        <div class="card-header">Portfolio Overview</div>
-        <div class="card-body">
-            <div class="stat">
-                <div class="stat-label">Total Equity</div>
-                <div class="stat-val" id="equity">$0.00</div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">Buying Power</div>
-                <div class="stat-val" id="cash" style="font-size: 18px;">$0.00</div>
-            </div>
-            <hr style="border:0; border-top:1px solid var(--border); margin: 20px 0;">
-            <div class="card-header" style="padding: 0 0 10px 0; background: none; border:0;">Watchlist Signals</div>
+    <div class="grid">
+        <div class="card">
+            <div class="label">Total Equity</div>
+            <div class="stat-val" id="equity">$0.00</div>
+            <div class="label">Buying Power</div>
+            <div class="stat-val" id="cash" style="font-size:18px;">$0.00</div>
+            <hr style="border:0; border-top:1px solid var(--border); margin:15px 0;">
+            <div class="label">Signals</div>
             <div id="ranked"></div>
         </div>
-    </div>
-
-    <!-- CENTER: POSITIONS -->
-    <div class="card">
-        <div class="card-header">Open Positions</div>
-        <div class="card-body">
+        <div class="card">
+            <div class="label">Open Positions</div>
             <table>
-                <thead>
-                    <tr>
-                        <th>Asset</th>
-                        <th>Qty</th>
-                        <th>Market Value</th>
-                        <th>P/L Today</th>
-                    </tr>
-                </thead>
-                <tbody id="positions-list"></tbody>
+                <thead><tr><th>Asset</th><th>Qty</th><th>Value</th><th>Day P/L</th></tr></thead>
+                <tbody id="pos-list"></tbody>
             </table>
         </div>
-    </div>
-
-    <!-- RIGHT: LOGS -->
-    <div class="card">
-        <div class="card-header">Execution Logs</div>
-        <div class="card-body" id="activity" style="font-family: monospace; font-size: 11px;">
+        <div class="card">
+            <div class="label">Activity Logs</div>
+            <div id="logs" style="font-family:monospace; font-size:11px; margin-top:10px;"></div>
         </div>
     </div>
-</div>
-
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
-<script>
-    const socket = io();
-
-    socket.on("update", (d) => {
-        // Update Account
-        document.getElementById("equity").innerText = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(d.account.equity || 0);
-        document.getElementById("cash").innerText = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(d.account.cash || 0);
-
-        // Update Signals
-        document.getElementById("ranked").innerHTML = d.ranked.map(r => `
-            <div class="item">
-                <span><b>${r.symbol}</b> <span style="color:#8b949e; margin-left:5px;">$${r.price.toFixed(2)}</span></span>
-                <span class="${r.score > 0 ? 'green' : 'red'}">${r.score > 0 ? '▲' : '▼'} ${Math.abs(r.score).toFixed(2)}</span>
-            </div>
-        `).join("");
-
-        // Update Positions
-        document.getElementById("positions-list").innerHTML = d.positions.map(p => `
-            <tr>
-                <td><b>${p.symbol}</b></td>
-                <td>${p.qty}</td>
-                <td>$${parseFloat(p.market_value).toFixed(2)}</td>
-                <td class="${parseFloat(p.unrealized_intraday_pl) >= 0 ? 'green' : 'red'}">
-                    $${parseFloat(p.unrealized_intraday_pl).toFixed(2)}
-                </td>
-            </tr>
-        `).join("");
-
-        // Update Logs
-        document.getElementById("activity").innerHTML = d.activity.map(a => `
-            <div style="margin-bottom: 5px; color: ${a.includes('FAILED') ? '#f85149' : '#c9d1d9'}">
-                ${a}
-            </div>
-        `).join("");
-    });
-
-    socket.on('disconnect', () => {
-        document.querySelector('.status-dot').style.backgroundColor = '#da3633';
-        document.getElementById('connection-status').innerText = 'DISCONNECTED';
-    });
-</script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+        socket.on("update", (d) => {
+            document.getElementById("equity").innerText = f.format(d.account.equity || 0);
+            document.getElementById("cash").innerText = f.format(d.account.buying_power || 0);
+            document.getElementById("mkt").innerText = "MODE: " + d.market_status;
+            document.getElementById("pos-list").innerHTML = d.positions.map(p => `
+                <tr>
+                    <td><b>${p.symbol}</b></td>
+                    <td>${p.qty}</td>
+                    <td>${f.format(p.market_value)}</td>
+                    <td class="${p.unrealized_intraday_pl >= 0 ? 'green' : 'red'}">${f.format(p.unrealized_intraday_pl)}</td>
+                </tr>`).join("");
+            document.getElementById("ranked").innerHTML = d.ranked.map(r => `
+                <div class="item">
+                    <span>${r.symbol}</span>
+                    <span class="${r.score >= 0 ? 'green' : 'red'}">${r.score.toFixed(2)}</span>
+                </div>`).join("");
+            document.getElementById("logs").innerHTML = d.activity.map(a => `<div style="margin-bottom:5px;">${a}</div>`).join("");
+        });
+    </script>
 </body>
 </html>
 """
 
-# =========================================================
-# START
-# =========================================================
-
 threading.Thread(target=engine, daemon=True).start()
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=PORT, allow_unsafe_werkzeug=True)
+    socketio.run(app, host="0.0.0.0", port=PORT)
