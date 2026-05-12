@@ -4,7 +4,6 @@ import threading
 import numpy as np
 import pandas as pd
 import requests
-from flask import Flask, request, redirect, session
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
@@ -25,18 +24,16 @@ HEADERS = {
 
 PORT = int(os.environ.get("PORT", 7777))
 
-USERNAME = "admin"
-PASSWORD = "trader123"
+# =========================================================
+# FLASK
+# =========================================================
 
-# =========================================================
-# APP
-# =========================================================
+from flask import Flask
 
 app = Flask(__name__)
-app.secret_key = "ml_trader"
 
 # =========================================================
-# ML MODEL STORAGE
+# ML MODEL
 # =========================================================
 
 model = LogisticRegression()
@@ -44,7 +41,6 @@ scaler = StandardScaler()
 
 training_data = []
 labels = []
-
 model_ready = False
 
 # =========================================================
@@ -54,11 +50,11 @@ model_ready = False
 bot = {
     "running": True,
     "last": "booted",
-    "watchlist": ["AAPL","TSLA","NVDA","AMD","SPY","QQQ"]
+    "watchlist": ["AAPL","TSLA","NVDA","AMD","SPY","QQQ","META","AMZN"]
 }
 
 # =========================================================
-# API HELPERS
+# API
 # =========================================================
 
 def get(url):
@@ -66,14 +62,6 @@ def get(url):
 
 def post(url, payload):
     return requests.post(BASE_URL + url, json=payload, headers=HEADERS)
-
-def positions():
-    r = get("/v2/positions")
-    return r.json() if r.status_code == 200 else []
-
-def account():
-    r = get("/v2/account")
-    return r.json() if r.status_code == 200 else {}
 
 # =========================================================
 # DATA
@@ -89,13 +77,14 @@ def bars(symbol, tf="1Min", limit=80):
         return None
 
     data = r.json().get("bars", [])
+
     return pd.DataFrame(data) if data else None
 
 # =========================================================
-# FEATURE ENGINE (THIS IS WHAT ML LEARNS FROM)
+# FEATURES
 # =========================================================
 
-def build_features(df):
+def features(df):
 
     return [
         df["c"].iloc[-1],
@@ -110,7 +99,7 @@ def build_features(df):
 # TRAIN MODEL
 # =========================================================
 
-def train_model():
+def train():
 
     global model_ready
 
@@ -128,47 +117,35 @@ def train_model():
     model_ready = True
 
 # =========================================================
-# ML PREDICTION
+# PREDICT
 # =========================================================
 
-def predict(features):
+def predict(x):
 
     if not model_ready:
         return 0.5
 
-    X = scaler.transform([features])
+    x = scaler.transform([x])
 
-    return model.predict_proba(X)[0][1]
-
-# =========================================================
-# TRADE MEMORY (SELF LEARNING)
-# =========================================================
-
-def record_trade(features, profit):
-
-    training_data.append(features)
-
-    labels.append(1 if profit > 0 else 0)
+    return model.predict_proba(x)[0][1]
 
 # =========================================================
-# STRATEGY ENGINE (NOW ML CONTROLLED)
+# EVALUATE SYMBOL
 # =========================================================
 
 def evaluate(symbol):
 
-    df = bars(symbol, "1Min", 60)
+    df = bars(symbol,"1Min",60)
 
     if df is None or len(df) < 25:
         return None
 
-    features = build_features(df)
+    x = features(df)
 
-    confidence = predict(features)
-
-    return symbol, confidence, features
+    return symbol, predict(x), x
 
 # =========================================================
-# EXECUTION
+# BUY
 # =========================================================
 
 def buy(symbol):
@@ -184,7 +161,7 @@ def buy(symbol):
     bot["last"] = f"BUY {symbol}"
 
 # =========================================================
-# MAIN LOOP
+# LOOP
 # =========================================================
 
 def loop():
@@ -197,26 +174,26 @@ def loop():
                 time.sleep(5)
                 continue
 
-            candidates = []
+            picks = []
 
             for s in bot["watchlist"]:
 
-                result = evaluate(s)
+                r = evaluate(s)
 
-                if result:
+                if r:
 
-                    sym, conf, features = result
+                    sym, conf, x = r
 
                     if conf > 0.65:
-                        candidates.append((sym, conf, features))
+                        picks.append((sym, conf, x))
 
-            candidates.sort(key=lambda x: x[1], reverse=True)
+            picks.sort(key=lambda x: x[1], reverse=True)
 
-            for sym, conf, features in candidates[:3]:
+            for sym, conf, x in picks[:3]:
 
                 buy(sym)
 
-            train_model()
+            train()
 
             time.sleep(20)
 
@@ -225,42 +202,53 @@ def loop():
             time.sleep(5)
 
 # =========================================================
-# LOGIN
-# =========================================================
-
-@app.route("/login", methods=["GET","POST"])
-def login():
-
-    if request.method == "POST":
-
-        if request.form["username"] == USERNAME and request.form["password"] == PASSWORD:
-            session["auth"] = True
-            return redirect("/")
-
-    return "<h2>Login</h2>"
-
-# =========================================================
-# DASHBOARD
+# DASHBOARD (FIXED - NO LOGIN, NOT BLANK)
 # =========================================================
 
 @app.route("/")
 def dash():
 
-    if not session.get("auth"):
-        return redirect("/login")
+    html = f"""
+    <html>
+    <head>
+    <meta http-equiv="refresh" content="10">
+    <style>
 
-    return f"""
-    <body style='background:#0b0f1a;color:white;font-family:Arial'>
-    <h2>ML Trading Bot</h2>
+    body {{
+        background:#0b0f1a;
+        color:white;
+        font-family:Arial;
+    }}
 
-    <p>Status: {bot['last']}</p>
+    .box {{
+        background:rgba(255,255,255,0.06);
+        padding:15px;
+        margin:10px;
+        border-radius:12px;
+    }}
 
-    <p>ML Ready: {model_ready}</p>
+    </style>
+    </head>
 
-    <p>Training Samples: {len(training_data)}</p>
+    <body>
+
+    <div class="box">
+        <h2>ML Trading Bot</h2>
+        <p>Status: {bot['last']}</p>
+        <p>ML Ready: {model_ready}</p>
+        <p>Training Samples: {len(training_data)}</p>
+    </div>
+
+    <div class="box">
+        <h3>Watchlist</h3>
+        <p>{", ".join(bot['watchlist'])}</p>
+    </div>
 
     </body>
+    </html>
     """
+
+    return html
 
 # =========================================================
 # START
