@@ -1,6 +1,3 @@
-import eventlet
-eventlet.monkey_patch()
-
 import os
 import time
 import threading
@@ -27,7 +24,8 @@ HEADERS = {
 PORT = int(os.environ.get("PORT", 7777))
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet", ping_timeout=60, ping_interval=15)
+# Changed from eventlet to threading for flawless cloud stability
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading", ping_timeout=60, ping_interval=15)
 
 UNIVERSE = [
     "AAPL", "TSLA", "NVDA", "AMD", "META", "AMZN", "MSFT", "GOOGL", "NFLX", 
@@ -99,7 +97,7 @@ def place_order(symbol, current_price):
         stop_loss = round(current_price * (1 - (bot["risk_pct"] / 100)), 2)
         payload = {
             "symbol": symbol, "qty": qty, "side": "buy", "type": "market",
-            "time_in_force": "day", # Fix for fractional orders
+            "time_in_force": "day",
             "order_class": "bracket",
             "take_profit": {"limit_price": take_profit},
             "stop_loss": {"stop_price": stop_loss}
@@ -207,7 +205,10 @@ def home():
 </div>
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-    const socket = io();
+    const socket = io({
+        transports: ["websocket", "polling"],
+        upgrade: true
+    });
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     function updateCountdown(endTime) {
         if (!endTime) return "Calculating...";
@@ -223,21 +224,21 @@ def home():
 
         const posContainer = document.getElementById("pos-container");
         if (d.positions.length > 0) {
-            posContainer.innerHTML = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody>\${d.positions.map(p => {
+            posContainer.innerHTML = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody>${d.positions.map(p => {
                 const entry = parseFloat(p.avg_entry_price);
-                return \`<tr><td><b>\${p.symbol}</b></td><td>\${f.format(entry)}</td><td>\${f.format(p.current_price)}</td><td style="color:\${p.unrealized_intraday_pl >= 0 ? 'var(--green)' : 'var(--red)'}">\${f.format(p.unrealized_intraday_pl)}</td><td style="color:var(--red)">\${f.format(entry * 0.98)}</td><td style="color:var(--blue)">\${f.format(entry * 1.06)}</td></tr>\`;
+                return `<tr><td><b>${p.symbol}</b></td><td>${f.format(entry)}</td><td>${f.format(p.current_price)}</td><td style="color:${p.unrealized_intraday_pl >= 0 ? 'var(--green)' : 'var(--red)'}">${f.format(p.unrealized_intraday_pl)}</td><td style="color:var(--red)">${f.format(entry * 0.98)}</td><td style="color:var(--blue)">${f.format(entry * 1.06)}</td></tr>`;
             }).join("")}</tbody></table>`;
         } else {
-            posContainer.innerHTML = `<div class="countdown-box"><div class="muted">No Active Positions</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div><hr style="border:0; border-top:1px solid var(--border); margin:15px 0;"><div class="muted">\${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div><div style="font-size:24px; font-weight:bold; color:#fff;">\${updateCountdown(d.next_event)}</div></div>`;
+            posContainer.innerHTML = `<div class="countdown-box"><div class="muted">No Active Positions</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div><hr style="border:0; border-top:1px solid var(--border); margin:15px 0;"><div class="muted">${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div><div style="font-size:24px; font-weight:bold; color:#fff;">${updateCountdown(d.next_event)}</div></div>`;
         }
 
         document.getElementById("ranked").innerHTML = d.ranked.map(r => {
             const threshold = 0.15;
-            let status = r.score >= threshold ? "⚡ TRIGGERED" : (r.score > 0 ? \`📈 Est. \${Math.round(( (threshold-r.score)/r.score ) * 15)}m to target\` : "📉 Awaiting Reversal");
+            let status = r.score >= threshold ? "⚡ TRIGGERED" : (r.score > 0 ? `📈 Est. ${Math.round(( (threshold-r.score)/r.score ) * 15)}m to target` : "📉 Awaiting Reversal");
             let color = r.score >= threshold ? "var(--green)" : (r.score > 0 ? "var(--orange)" : "var(--red)");
-            return \`<div style="padding:10px 0; border-bottom:1px solid var(--border);"><div style="display:flex; justify-content:space-between;"><b>\${r.symbol}</b> <span>\${r.score.toFixed(2)}%</span></div><div style="font-size:11px; color:\${color}; font-weight:bold; margin-top:4px;">\${status}</div></div>\`;
+            return `<div style="padding:10px 0; border-bottom:1px solid var(--border);"><div style="display:flex; justify-content:space-between;"><b>${r.symbol}</b> <span>${r.score.toFixed(2)}%</span></div><div style="font-size:11px; color:${color}; font-weight:bold; margin-top:4px;">${status}</div></div>`;
         }).join("");
-        document.getElementById("logs").innerHTML = d.activity.map(a => \`<div style="padding:4px 0; border-bottom:1px solid #1f2937;">\${a}</div>\`).join("");
+        document.getElementById("logs").innerHTML = d.activity.map(a => `<div style="padding:4px 0; border-bottom:1px solid #1f2937;">${a}</div>`).join("");
     });
 </script>
 </body>
