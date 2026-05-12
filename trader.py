@@ -247,4 +247,4 @@ def home():
 
 if __name__ == "__main__":
     threading.Thread(target=engine, daemon=True).start()
-    socketio.run(app, host="0.0.0.0", port=PORT)
+    socketio.run(app, host="0.0.0.0", port=PORT, allow_unsafe_werkzeug=True)
