@@ -70,29 +70,43 @@ def get_positions():
 
 def place_order(symbol, qty, current_price):
     try:
-        take_profit_price = round(current_price * 1.05, 2)
-        stop_loss_price = round(current_price * 0.98, 2)
-
-        payload = {
+        # 1. First, buy the asset at Market Price
+        buy_payload = {
             "symbol": symbol,
             "qty": qty,
             "side": "buy",
             "type": "market",
-            "time_in_force": "gtc",
-            "order_class": "bracket",
-            "take_profit": {"limit_price": take_profit_price},
-            "stop_loss": {"stop_price": stop_loss_price, "limit_price": stop_loss_price}
+            "time_in_force": "gtc"
         }
-
-        r = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
+        r_buy = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=buy_payload)
         
-        if r.status_code == 200:
-            log_event(f"BOUGHT {qty} {symbol} | TP: ${take_profit_price} | SL: ${stop_loss_price}")
+        if r_buy.status_code == 200:
+            log_event(f"BOUGHT {qty} {symbol} at ~${current_price}")
+            
+            # 2. Immediately attach a Trailing Stop Sell Order
+            trail_payload = {
+                "symbol": symbol,
+                "qty": qty,
+                "side": "sell",
+                "type": "trailing_stop",
+                "trail_percent": 2.0,  # Trails 2% behind the highest price
+                "time_in_force": "gtc"
+            }
+            
+            # Tiny delay to let Alpaca register the buy before we place the sell
+            time.sleep(1) 
+            r_trail = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=trail_payload)
+            
+            if r_trail.status_code == 200:
+                log_event(f"ATTACHED 2% Trailing Stop to {symbol}")
+            else:
+                log_event(f"TRAIL STOP FAILED {symbol}: {r_trail.json().get('message', r_trail.text)}")
+                
         else:
-            log_event(f"REJECTED {symbol}: {r.json().get('message', r.text)}")
+            log_event(f"REJECTED {symbol}: {r_buy.json().get('message', r_buy.text)}")
+            
     except Exception as e:
         log_event(f"ORDER FAILED: {str(e)}")
-
 # =========================================================
 # MARKET DATA & AI SIGNAL ENGINE
 # =========================================================
