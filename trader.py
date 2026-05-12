@@ -132,7 +132,7 @@ def place_order(symbol, current_price):
             "qty": qty,
             "side": "buy",
             "type": "market",
-            "time_in_force": "gtc",
+            "time_in_force": "day",
             "order_class": "bracket",
             "take_profit": {"limit_price": take_profit_price},
             "stop_loss": {"stop_price": stop_loss_price}
