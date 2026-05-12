@@ -53,11 +53,11 @@ def get_account():
         r = requests.get(f"{BASE_URL}/v2/account", headers=HEADERS)
         if r.status_code != 200:
             log_event(f"Account Sync Error: {r.text}")
-            return {"equity": "0.00", "buying_power": "0.00"}
+            return {"equity": "0.00", "buying_power": "0.00", "last_equity": "0.00"}
         return r.json()
     except Exception as e:
         log_event(f"Network Error: {str(e)}")
-        return {"equity": "0.00", "buying_power": "0.00"}
+        return {"equity": "0.00", "buying_power": "0.00", "last_equity": "0.00"}
 
 def get_positions():
     try:
@@ -168,7 +168,11 @@ def engine():
 
             # 5. Broadcast to UI
             socketio.emit("update", {
-                "account": {"equity": acc.get("equity", "0.00"), "cash": acc.get("buying_power", "0.00")},
+                "account": {
+                    "equity": acc.get("equity", "0.00"), 
+                    "cash": acc.get("buying_power", "0.00"),
+                    "last_equity": acc.get("last_equity", "0.00") # Grab yesterday's close for math
+                },
                 "positions": pos,
                 "ranked": ranked[:8],
                 "activity": activity_log[::-1],
@@ -199,7 +203,7 @@ def home():
     .card { background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:12px; padding:20px; display:flex; flex-direction:column; overflow:hidden; }
     .card-body { overflow-y:auto; flex-grow:1; }
     .muted { color:#9ca3af; font-size:11px; text-transform:uppercase; font-weight:800; letter-spacing:1px; margin-bottom:5px; }
-    .big { font-size:32px; font-weight:bold; margin-bottom:15px; color:#fff; }
+    .big { font-size:32px; font-weight:bold; color:#fff; }
     table { width:100%; border-collapse:collapse; font-size:13px; text-align:left; }
     th { color:#9ca3af; padding-bottom:12px; border-bottom:1px solid var(--border); font-weight:600; }
     td { padding:12px 0; border-bottom:1px solid var(--border); }
@@ -222,7 +226,11 @@ def home():
 <div class="grid">
     <div class="card">
         <div class="muted">Net Equity</div>
-        <div class="big" id="equity">$0.00</div>
+        <div style="display: flex; align-items: baseline; gap: 10px; margin-bottom: 15px;">
+            <div class="big" id="equity">$0.00</div>
+            <div id="equity-pct" style="font-size: 16px; font-weight: bold; color: #9ca3af;">0.00%</div>
+        </div>
+        
         <div class="muted">Buying Power</div>
         <div id="cash" style="font-size:20px; font-weight:bold; margin-bottom:25px; color:#9ca3af;">$0.00</div>
         <hr style="border:0; border-top:1px solid var(--border); margin-bottom:20px;">
@@ -260,13 +268,32 @@ def home():
     socket.on('disconnect', () => { statusBtn.innerText = "DISCONNECTED"; statusBtn.style.background = "#ef4444"; document.getElementById("mkt").innerText = "LOST CONNECTION"; });
 
     socket.on("update", (d) => {
-        // As soon as data hits, turn the button fully green
         statusBtn.innerText = "LIVE SYNC";
         statusBtn.style.background = "#22c55e";
 
-        document.getElementById("equity").innerText = f.format(d.account.equity || 0);
+        // MATH FOR THE EQUITY PERCENTAGE CHANGE
+        const currentEq = parseFloat(d.account.equity || 0);
+        const lastEq = parseFloat(d.account.last_equity || currentEq);
+        let pctChange = 0;
+        
+        if (lastEq > 0) {
+            pctChange = ((currentEq - lastEq) / lastEq) * 100;
+        }
+
+        document.getElementById("equity").innerText = f.format(currentEq);
         document.getElementById("cash").innerText = f.format(d.account.cash || 0);
         document.getElementById("mkt").innerText = d.market_status;
+
+        // Apply colors and +/- to the new UI element
+        const eqPctEl = document.getElementById("equity-pct");
+        if (pctChange === 0) {
+            eqPctEl.innerText = "0.00%";
+            eqPctEl.style.color = "#9ca3af";
+        } else {
+            const isPos = pctChange > 0;
+            eqPctEl.innerText = (isPos ? "+" : "") + pctChange.toFixed(2) + "%";
+            eqPctEl.style.color = isPos ? "var(--green)" : "var(--red)";
+        }
 
         if (d.positions.length === 0) {
             document.getElementById("pos-table").innerHTML = "<tr><td colspan='6' style='text-align:center; color:#6b7280; padding-top:20px;'>No active positions.</td></tr>";
