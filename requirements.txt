@@ -1,6 +1,8 @@
 flask
-pandas
+flask-socketio
+eventlet
 requests
-gunicorn
-scikit-learn
+pandas
 numpy
+scikit-learn
+gunicorn
