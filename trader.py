@@ -5,12 +5,14 @@ import numpy as np
 import pandas as pd
 import requests
 
-from flask import Flask, redirect
+from flask import Flask
+from flask_socketio import SocketIO
+
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 # =========================================================
-# RAILWAY CONFIG
+# CONFIG
 # =========================================================
 
 API_KEY = os.environ.get("ALPACA_API_KEY", "YOUR_KEY")
@@ -27,13 +29,14 @@ HEADERS = {
 PORT = int(os.environ.get("PORT", 7777))
 
 # =========================================================
-# FLASK (MUST BE FIRST)
+# APP + SOCKETS
 # =========================================================
 
 app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # =========================================================
-# ML SYSTEM
+# AI MODEL
 # =========================================================
 
 model = LogisticRegression()
@@ -49,40 +52,59 @@ model_ready = False
 
 bot = {
     "running": True,
-    "last": "booted",
-    "watchlist": ["AAPL","TSLA","NVDA","AMD","SPY","QQQ","META","AMZN"]
+    "watchlist": ["AAPL","TSLA","NVDA","AMD","SPY","QQQ","META","AMZN"],
+    "last_cycle": 0,
+    "max_positions": 4
 }
 
 last_actions = []
-next_cycle = 0
 
 # =========================================================
-# API
+# ALPACA API
 # =========================================================
 
-def get(url):
-    return requests.get(BASE_URL + url, headers=HEADERS)
-
-def post(url, payload):
-    return requests.post(BASE_URL + url, json=payload, headers=HEADERS)
-
-def account():
-    r = get("/v2/account")
+def get_account():
+    r = requests.get(BASE_URL + "/v2/account", headers=HEADERS)
     return r.json() if r.status_code == 200 else {}
 
-def positions():
-    r = get("/v2/positions")
+def get_positions():
+    r = requests.get(BASE_URL + "/v2/positions", headers=HEADERS)
     return r.json() if r.status_code == 200 else []
 
+def place_order(symbol, side, qty=1):
+
+    try:
+        r = requests.post(
+            BASE_URL + "/v2/orders",
+            headers=HEADERS,
+            json={
+                "symbol": symbol,
+                "qty": qty,
+                "side": side,
+                "type": "market",
+                "time_in_force": "gtc"
+            }
+        )
+
+        if r.status_code in [200, 201]:
+            last_actions.append(f"{side.upper()} {symbol}")
+        else:
+            last_actions.append(f"ORDER FAIL {symbol}")
+
+    except Exception as e:
+        last_actions.append(f"ERROR {str(e)}")
+
 # =========================================================
-# DATA
+# MARKET DATA
 # =========================================================
 
-def bars(symbol, tf="1Min", limit=80):
+def get_bars(symbol):
 
-    url = f"{DATA_URL}/stocks/{symbol}/bars"
-
-    r = requests.get(url, headers=HEADERS, params={"timeframe": tf, "limit": limit})
+    r = requests.get(
+        f"{DATA_URL}/stocks/{symbol}/bars",
+        headers=HEADERS,
+        params={"timeframe": "1Min", "limit": 60}
+    )
 
     if r.status_code != 200:
         return None
@@ -95,50 +117,16 @@ def bars(symbol, tf="1Min", limit=80):
 # =========================================================
 
 def features(df):
-
     return [
         df["c"].iloc[-1],
         df["c"].rolling(5).mean().iloc[-1],
         df["c"].rolling(20).mean().iloc[-1],
         df["v"].iloc[-1],
-        df["v"].rolling(10).mean().iloc[-1],
         df["h"].max() - df["l"].min()
     ]
 
 # =========================================================
-# AUTO DATA GENERATION (ML LEARNING)
-# =========================================================
-
-def generate():
-
-    for s in bot["watchlist"]:
-
-        df = bars(s, "1Min", 80)
-
-        if df is None or len(df) < 40:
-            continue
-
-        for i in range(25, len(df)-1):
-
-            w = df.iloc[:i]
-            f = df.iloc[i+1]
-
-            x = [
-                w["c"].iloc[-1],
-                w["c"].rolling(5).mean().iloc[-1],
-                w["c"].rolling(20).mean().iloc[-1],
-                w["v"].iloc[-1],
-                w["v"].rolling(10).mean().iloc[-1],
-                w["h"].max() - w["l"].min()
-            ]
-
-            y = 1 if f["c"] > w["c"].iloc[-1] else 0
-
-            X_data.append(x)
-            y_data.append(y)
-
-# =========================================================
-# TRAIN MODEL
+# ML TRAIN
 # =========================================================
 
 def train():
@@ -167,251 +155,192 @@ def predict(x):
     if not model_ready:
         return 0.5
 
-    x = scaler.transform([x])
-
-    return model.predict_proba(x)[0][1]
+    return model.predict_proba(scaler.transform([x]))[0][1]
 
 # =========================================================
-# RANKING SYSTEM
+# SCANNER
 # =========================================================
 
-def rank():
+def scan_market():
 
     ranked = []
 
     for s in bot["watchlist"]:
 
-        df = bars(s, "1Min", 60)
+        df = get_bars(s)
 
         if df is None or len(df) < 30:
             continue
 
         x = features(df)
-
         conf = predict(x)
 
-        ranked.append((s, conf))
+        ranked.append({
+            "symbol": s,
+            "confidence": float(conf),
+            "price": float(df["c"].iloc[-1])
+        })
 
-    ranked.sort(key=lambda x: x[1], reverse=True)
+    ranked.sort(key=lambda x: x["confidence"], reverse=True)
 
-    return ranked[:3]
-
-# =========================================================
-# BUY
-# =========================================================
-
-def buy(symbol):
-
-    post("/v2/orders", {
-        "symbol": symbol,
-        "qty": 1,
-        "side": "buy",
-        "type": "market",
-        "time_in_force": "gtc"
-    })
-
-    bot["last"] = f"BUY {symbol}"
-    last_actions.append(f"BUY {symbol}")
+    return ranked[:5]
 
 # =========================================================
-# LOOP
+# TRADING ENGINE
 # =========================================================
 
-def loop():
-
-    global next_cycle
+def engine():
 
     while True:
 
-        try:
+        if not bot["running"]:
+            time.sleep(1)
+            continue
 
-            if not bot["running"]:
-                time.sleep(2)
-                continue
+        train()
 
-            next_cycle = 20
+        account = get_account()
+        positions = get_positions()
+        ranked = scan_market()
 
-            last_actions.append("Scanning market...")
+        # =====================================================
+        # RISK CONTROL
+        # =====================================================
 
-            generate()
-            train()
-
-            top = rank()
-
-            for s, c in top:
-
-                last_actions.append(f"{s} confidence {c:.2f}")
-
-                if c > 0.65:
-                    buy(s)
-
-            for i in range(20):
-                next_cycle = 20 - i
-                time.sleep(1)
-
-        except Exception as e:
-            last_actions.append(str(e))
+        if len(positions) >= bot["max_positions"]:
+            last_actions.append("MAX POSITIONS REACHED")
             time.sleep(3)
+            continue
+
+        # =====================================================
+        # EXECUTION LOGIC
+        # =====================================================
+
+        for r in ranked:
+
+            symbol = r["symbol"]
+            conf = r["confidence"]
+
+            last_actions.append(f"{symbol} {conf:.2f}")
+
+            if conf > 0.72:
+                place_order(symbol, "buy", 1)
+
+            if conf < 0.35:
+                # simple exit logic
+                for p in positions:
+                    if p["symbol"] == symbol:
+                        place_order(symbol, "sell", p["qty"])
+
+        # =====================================================
+        # STREAM DATA TO UI
+        # =====================================================
+
+        socketio.emit("update", {
+            "account": {
+                "equity": account.get("equity"),
+                "cash": account.get("cash")
+            },
+            "positions": positions,
+            "ranked": ranked,
+            "last_actions": last_actions[-15:],
+            "model_ready": model_ready
+        })
+
+        time.sleep(3)
 
 # =========================================================
-# CONTROLS
-# =========================================================
-
-@app.route("/toggle")
-def toggle():
-
-    bot["running"] = not bot["running"]
-
-    return redirect("/")
-
-# =========================================================
-# DASHBOARD (MODERN TERMINAL UI)
+# UI (NO REFRESH - SOCKET ONLY)
 # =========================================================
 
 @app.route("/")
-def dash():
+def index():
 
-    acc = account()
-    pos = positions()
+    return """
+<!DOCTYPE html>
+<html>
+<head>
+<title>AI Quant Terminal</title>
 
-    equity = acc.get("equity", "0")
-    cash = acc.get("cash", "0")
+<style>
+body {
+    margin:0;
+    background:#0a0f1f;
+    color:white;
+    font-family:Arial;
+}
 
-    total_pl = sum(float(p["unrealized_pl"]) for p in pos) if pos else 0
+.grid {
+    display:grid;
+    grid-template-columns:1fr 1fr 1fr;
+    gap:15px;
+    padding:15px;
+}
 
-    portfolio = ""
-    for p in pos:
-        portfolio += f"""
-        <div class="row">
-            <span>{p['symbol']}</span>
-            <span>{p['qty']}</span>
-            <span>${p['market_value']}</span>
-            <span style="color:{'lime' if float(p['unrealized_pl'])>=0 else 'red'}">
-                ${p['unrealized_pl']}
-            </span>
-        </div>
-        """
+.box {
+    background:rgba(255,255,255,0.05);
+    padding:15px;
+    border-radius:12px;
+}
+</style>
 
-    activity = ""
-    for a in list(last_actions)[-10:]:
-        activity += f"<div class='feed'>{a}</div>"
+</head>
 
-    ranked = ""
-    for s, c in rank():
-        ranked += f"""
-        <div class="card">
-            <b>{s}</b><br>
-            Confidence: {round(c*100,1)}%
-        </div>
-        """
+<body>
 
-    return f"""
-    <html>
-    <head>
-    <meta http-equiv="refresh" content="5">
+<h2 style="padding:15px;">Pro AI Trading Terminal</h2>
 
-    <style>
+<div class="grid">
 
-    body {{
-        margin:0;
-        background:#0a0f1f;
-        color:white;
-        font-family:Arial;
-    }}
+<div class="box">
+<h3>Account</h3>
+<div id="account">loading...</div>
+</div>
 
-    .top {{
-        display:flex;
-        justify-content:space-between;
-        padding:15px;
-        background:#111827;
-    }}
+<div class="box">
+<h3>Top Trades</h3>
+<div id="ranked"></div>
+</div>
 
-    .grid {{
-        display:grid;
-        grid-template-columns:1fr 1fr 1fr;
-        gap:15px;
-        padding:15px;
-    }}
+<div class="box">
+<h3>Activity</h3>
+<div id="activity"></div>
+</div>
 
-    .panel {{
-        background:rgba(255,255,255,0.05);
-        border-radius:14px;
-        padding:15px;
-    }}
+</div>
 
-    .row {{
-        display:flex;
-        justify-content:space-between;
-        padding:5px 0;
-        border-bottom:1px solid #1f2937;
-    }}
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 
-    .feed {{
-        font-size:12px;
-        opacity:0.8;
-    }}
+<script>
 
-    .card {{
-        background:rgba(255,255,255,0.06);
-        padding:10px;
-        margin:5px 0;
-        border-radius:10px;
-    }}
+const socket = io();
 
-    button {{
-        padding:8px 12px;
-        border:none;
-        border-radius:8px;
-        background:#2563eb;
-        color:white;
-    }}
+socket.on("update", (data) => {
 
-    </style>
-    </head>
+document.getElementById("account").innerHTML =
+"Equity: $" + data.account.equity + "<br>Cash: $" + data.account.cash;
 
-    <body>
+document.getElementById("ranked").innerHTML =
+data.ranked.map(r =>
+`<div><b>${r.symbol}</b> - ${(r.confidence*100).toFixed(1)}% - $${r.price}</div>`
+).join("");
 
-    <div class="top">
-        <div><b>AI Trading Terminal</b></div>
-        <div>Next Update: {next_cycle}s</div>
-        <div><a href="/toggle"><button>{"STOP" if bot['running'] else "START"}</button></a></div>
-    </div>
+document.getElementById("activity").innerHTML =
+data.last_actions.map(a => `<div>${a}</div>`).join("");
 
-    <div class="grid">
+});
 
-        <div class="panel">
-            <h3>Account</h3>
-            Equity: ${equity}<br>
-            Cash: ${cash}<br>
-            P/L: <span style="color:{'lime' if total_pl>=0 else 'red'}">${total_pl:.2f}</span>
-        </div>
+</script>
 
-        <div class="panel">
-            <h3>Activity</h3>
-            {activity}
-        </div>
-
-        <div class="panel">
-            <h3>Opportunities</h3>
-            {ranked}
-        </div>
-
-        <div class="panel">
-            <h3>Portfolio</h3>
-            {portfolio}
-        </div>
-
-    </div>
-
-    </body>
-    </html>
-    """
+</body>
+</html>
+"""
 
 # =========================================================
 # START
 # =========================================================
 
-threading.Thread(target=loop, daemon=True).start()
+threading.Thread(target=engine, daemon=True).start()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+    socketio.run(app, host="0.0.0.0", port=PORT)
