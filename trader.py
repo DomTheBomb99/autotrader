@@ -29,19 +29,26 @@ PORT = int(os.environ.get("PORT", 7777))
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet", ping_timeout=60, ping_interval=15)
 
+# The "Universe" of highly volatile stocks the bot will scan every morning
+UNIVERSE = [
+    "AAPL", "TSLA", "NVDA", "AMD", "META", "AMZN", "MSFT", "GOOGL", "NFLX", 
+    "COIN", "MARA", "RIOT", "MSTR", "PLTR", "SNOW", "UBER", "ROKU", "SQ", 
+    "PYPL", "HOOD", "GME", "AMC", "BA", "DIS", "LCID", "RIVN", "SOFI", "DKNG"
+]
+
 bot = {
     "running": True,
-    "watchlist": ["AAPL", "TSLA", "NVDA", "AMD", "SPY", "QQQ", "GME"],
-    "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+    "watchlist": [], # Starts empty, filled by the scanner
+    "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"],
     "trade_amount_usd": 20.00,
     "last_eod_date": "",
+    "last_scan_date": "",
     
-    # --- ASYMMETRIC RISK/REWARD PROFILE ---
-    "risk_pct": 2.0,    # Risk 2% on the downside
-    "reward_pct": 6.0   # Target 6% on the upside (1:3 Ratio)
+    "risk_pct": 2.0,    # Risk 2%
+    "reward_pct": 6.0   # Target 6%
 }
 
-activity_log = ["System Initialized... Loading Risk/Reward Protocols"]
+activity_log = ["System Initialized... Booting Scanner Protocols"]
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -50,6 +57,52 @@ def log_event(msg):
     activity_log.append(full_msg)
     if len(activity_log) > 25:
         activity_log.pop(0)
+
+# =========================================================
+# THE DAILY SCANNER
+# =========================================================
+def run_daily_scanner():
+    log_event("📡 RUNNING MARKET SCANNER: Analyzing 30 volatile assets...")
+    try:
+        # Get a snapshot of all stocks in our universe in ONE single API call
+        url = f"{DATA_URL}/stocks/snapshots"
+        params = {"symbols": ",".join(UNIVERSE), "feed": "iex"}
+        
+        r = requests.get(url, headers=HEADERS, params=params)
+        if r.status_code != 200:
+            log_event(f"SCANNER ERROR: {r.text}")
+            return False
+            
+        data = r.json()
+        movers = []
+        
+        # Calculate pre-market or daily momentum for each stock
+        for symbol, snap in data.items():
+            try:
+                prev_close = snap["prevDailyBar"]["c"]
+                current_price = snap["latestTrade"]["p"]
+                
+                if prev_close > 0:
+                    pct_change = ((current_price - prev_close) / prev_close) * 100
+                    movers.append({"symbol": symbol, "change": pct_change})
+            except:
+                continue
+                
+        # Sort by highest positive percentage change
+        movers.sort(key=lambda x: x["change"], reverse=True)
+        
+        # Grab the top 5
+        top_5 = [m["symbol"] for m in movers[:5]]
+        bot["watchlist"] = top_5
+        
+        log_event(f"🎯 SCAN COMPLETE. Today's Targets: {', '.join(top_5)}")
+        return True
+        
+    except Exception as e:
+        log_event(f"SCANNER CRASH: {str(e)}")
+        # Fallback list if scanner fails
+        bot["watchlist"] = ["TSLA", "NVDA", "AMD", "COIN", "MARA"]
+        return False
 
 # =========================================================
 # SAFE ALPACA API HELPERS
@@ -77,11 +130,9 @@ def place_order(symbol, current_price):
         raw_qty = bot["trade_amount_usd"] / current_price
         qty = round(raw_qty, 5)
 
-        # 1:3 Math Calculation
         take_profit_price = round(current_price * (1 + (bot["reward_pct"] / 100)), 2)
         stop_loss_price = round(current_price * (1 - (bot["risk_pct"] / 100)), 2)
 
-        # Submit as a Bracket Order
         payload = {
             "symbol": symbol,
             "qty": qty,
@@ -89,13 +140,8 @@ def place_order(symbol, current_price):
             "type": "market",
             "time_in_force": "gtc",
             "order_class": "bracket",
-            "take_profit": {
-                "limit_price": take_profit_price
-            },
-            "stop_loss": {
-                "stop_price": stop_loss_price
-                # Notice we do NOT use limit_price here, creating a true Market Stop
-            }
+            "take_profit": {"limit_price": take_profit_price},
+            "stop_loss": {"stop_price": stop_loss_price}
         }
 
         r = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
@@ -134,8 +180,6 @@ def score_symbol(symbol):
     if df is None or len(df) < 20: return None
     
     current_price = float(df["c"].iloc[-1])
-    
-    # Upgraded Signal: Look for a stronger breakout to justify a 6% target
     past_price = float(df["c"].iloc[-15])
     percent_change = ((current_price - past_price) / past_price) * 100
     
@@ -145,19 +189,23 @@ def score_symbol(symbol):
 # TRADING ENGINE THREAD
 # =========================================================
 def engine():
-    log_event("Alpaca Connection Established. Scanning markets...")
     while True:
         try:
             clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS)
             clock_data = clock_req.json() if clock_req.status_code == 200 else {}
             is_open = clock_data.get("is_open", False)
             
-            # --- SWING VS DAY TRADE DECISION ENGINE ---
+            # --- RUN SCANNER ONCE PER DAY ---
+            curr_date = clock_data.get('timestamp', '')[:10]
+            if is_open and bot["last_scan_date"] != curr_date:
+                run_daily_scanner()
+                bot["last_scan_date"] = curr_date
+
+            # --- EOD DAY TRADE PROTOCOL ---
             if is_open and "next_close" in clock_data:
                 now_t = datetime.fromisoformat(clock_data['timestamp'])
                 close_t = datetime.fromisoformat(clock_data['next_close'])
                 mins_to_close = (close_t - now_t).total_seconds() / 60.0
-                curr_date = str(now_t.date())
                 
                 if 0 < mins_to_close < 15 and bot["last_eod_date"] != curr_date:
                     log_event("🔔 EOD PROTOCOL: Evaluating Overnight Risk...")
@@ -174,6 +222,11 @@ def engine():
 
             # 2. Score Assets
             active_list = bot["watchlist"] if is_open else bot["crypto_watchlist"]
+            
+            # If scanner hasn't run yet or failed, provide fallback
+            if not active_list: 
+                active_list = ["TSLA", "NVDA", "AMD", "COIN", "MARA"]
+
             ranked = []
             for s in active_list:
                 r = score_symbol(s)
@@ -185,7 +238,7 @@ def engine():
             pos = get_positions()
             orders = get_open_orders()
 
-            # 3. Execute Trades (Trigger threshold increased slightly for stronger conviction)
+            # 3. Execute Trades
             for r in ranked[:2]:
                 if r["score"] > 0.15:
                     already_hold = any(p.get('symbol') == r['symbol'] for p in pos)
@@ -258,7 +311,7 @@ def home():
         <div class="muted">Buying Power</div>
         <div id="cash" style="font-size:20px; font-weight:bold; margin-bottom:25px; color:#9ca3af;">$0.00</div>
         <hr style="border:0; border-top:1px solid var(--border); margin-bottom:20px;">
-        <div class="muted" style="margin-bottom:10px;">Live Breakout Signals</div>
+        <div class="muted" style="margin-bottom:10px;">Scanned Active Targets</div>
         <div class="card-body" id="ranked"></div>
     </div>
 
@@ -314,7 +367,6 @@ def home():
                 const plColor = isProfit ? '#22c55e' : '#ef4444';
                 const entry = parseFloat(p.avg_entry_price);
                 
-                // Reverse-engineer the target and stop based on the entry price
                 const stopLoss = entry * 0.98;
                 const target = entry * 1.06;
 
@@ -331,7 +383,7 @@ def home():
         }
 
         if (tableHTML === "") {
-            tableHTML = "<tr><td colspan='6' style='text-align:center; color:#6b7280; padding-top:20px;'>No active positions. Scanning for breakouts...</td></tr>";
+            tableHTML = "<tr><td colspan='6' style='text-align:center; color:#6b7280; padding-top:20px;'>No active positions. Scanning targets...</td></tr>";
         }
         
         document.getElementById("pos-table").innerHTML = tableHTML;
@@ -345,8 +397,8 @@ def home():
         document.getElementById("logs").innerHTML = d.activity.map(a => `
             <div style="margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid #1f2937;">
                 ${a.includes('ERROR') || a.includes('REJECTED') || a.includes('CRASH') ? `<span style="color:#ef4444">${a}</span>` : 
-                  a.includes('BOUGHT') ? `<span style="color:#22c55e">${a}</span>` : 
-                  a.includes('🔔') || a.includes('DAY TRADE') ? `<span style="color:#f59e0b">${a}</span>` : a}
+                  a.includes('BOUGHT') || a.includes('TARGET') ? `<span style="color:#22c55e">${a}</span>` : 
+                  a.includes('📡') || a.includes('🎯') || a.includes('DAY TRADE') ? `<span style="color:#f59e0b">${a}</span>` : a}
             </div>
         `).join("");
     });
