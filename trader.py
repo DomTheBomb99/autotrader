@@ -57,7 +57,7 @@ def positions():
 
 def order(symbol, side="buy", qty=1):
     try:
-        requests.post(
+        r = requests.post(
             BASE_URL + "/v2/orders",
             headers=HEADERS,
             json={
@@ -68,10 +68,13 @@ def order(symbol, side="buy", qty=1):
                 "time_in_force": "gtc"
             }
         )
-        last_actions.append(f"{side.upper()} {symbol}")
+        if r.status_code == 200:
+            last_actions.append(f"[{time.strftime('%H:%M:%S')}] {side.upper()} {symbol} - SUCCESS")
+        else:
+            last_actions.append(f"[{time.strftime('%H:%M:%S')}] {side.upper()} {symbol} - FAILED")
 
     except Exception as e:
-        last_actions.append(f"ORDER ERROR {str(e)}")
+        last_actions.append(f"ORDER ERROR: {str(e)}")
 
 # =========================================================
 # MARKET DATA
@@ -91,212 +94,176 @@ def get_bars(symbol):
     return pd.DataFrame(data) if data else None
 
 # =========================================================
-# SIMPLE SIGNAL ENGINE
-# =========================================================
-
-def score_symbol(symbol):
-
-    df = get_bars(symbol)
-    if df is None or len(df) < 20:
-        return None
-
-    price = df["c"].iloc[-1]
-    trend = df["c"].iloc[-1] - df["c"].iloc[-10]
-
-    score = trend
-
-    return {
-        "symbol": symbol,
-        "score": float(score),
-        "price": float(price)
-    }
-
-# =========================================================
 # TRADING ENGINE
 # =========================================================
 
 def engine():
-
     while True:
-
         if not bot["running"]:
             time.sleep(1)
             continue
 
         ranked = []
-
         for s in bot["watchlist"]:
-            r = score_symbol(s)
-            if r:
-                ranked.append(r)
+            df = get_bars(s)
+            if df is not None and len(df) >= 20:
+                price = float(df["c"].iloc[-1])
+                trend = float(df["c"].iloc[-1] - df["c"].iloc[-10])
+                ranked.append({"symbol": s, "score": trend, "price": price})
 
         ranked.sort(key=lambda x: x["score"], reverse=True)
+
+        # Simple Logic: Buy top ranked if score > 0.5
+        for r in ranked[:1]:
+            if r["score"] > 0.5:
+                order(r["symbol"], "buy", 1)
 
         acc = account()
         pos = positions()
 
-        # simple execution logic
-        for r in ranked[:2]:
-
-            if r["score"] > 0.5:
-                order(r["symbol"], "buy", 1)
-
-        # stream updates
         socketio.emit("update", {
             "account": acc,
             "positions": pos,
             "ranked": ranked,
-            "activity": last_actions[-12:]
+            "activity": last_actions[-10:][::-1] # Newest first
         })
 
-        time.sleep(3)
+        time.sleep(5)
 
 # =========================================================
-# UI
+# UI (MODERNIZED)
 # =========================================================
 
 @app.route("/")
 def home():
-
     return """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<title>AI Trading Terminal</title>
+    <meta charset="UTF-8">
+    <title>ALGO TERMINAL v2</title>
+    <style>
+        :root { --bg: #0a0e17; --card: #161b22; --border: #30363d; --green: #238636; --red: #da3633; --text: #c9d1d9; }
+        body { margin:0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica; }
+        
+        .header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 2rem; background: var(--card); border-bottom: 1px solid var(--border); }
+        .status-dot { height: 10px; width: 10px; background-color: var(--green); border-radius: 50%; display: inline-block; margin-right: 5px; }
+        
+        .grid { display: grid; grid-template-columns: 300px 1fr 350px; gap: 1rem; padding: 1.5rem; height: calc(100vh - 100px); }
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; }
+        .card-header { padding: 10px 15px; background: rgba(255,255,255,0.03); border-bottom: 1px solid var(--border); font-weight: bold; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+        .card-body { padding: 15px; flex-grow: 1; overflow-y: auto; }
+        
+        .stat { margin-bottom: 15px; }
+        .stat-val { font-size: 24px; font-weight: 800; color: #fff; }
+        .stat-label { font-size: 11px; color: #8b949e; text-transform: uppercase; }
 
-<style>
-
-body {
-    margin:0;
-    background:#0b1220;
-    color:#e5e7eb;
-    font-family:Arial;
-}
-
-/* HEADER */
-.header {
-    display:flex;
-    justify-content:space-between;
-    padding:15px 20px;
-    background:#111827;
-    border-bottom:1px solid #1f2937;
-}
-
-/* GRID */
-.grid {
-    display:grid;
-    grid-template-columns:1.2fr 1fr 1fr;
-    gap:15px;
-    padding:15px;
-}
-
-/* CARDS */
-.card {
-    background:rgba(255,255,255,0.05);
-    border:1px solid rgba(255,255,255,0.08);
-    border-radius:14px;
-    padding:15px;
-}
-
-/* TITLES */
-h2,h3 {
-    margin:0 0 10px 0;
-}
-
-/* TEXT */
-.muted {
-    color:#9ca3af;
-    font-size:13px;
-}
-
-/* ITEMS */
-.item {
-    padding:6px 0;
-    border-bottom:1px solid #1f2937;
-    font-size:14px;
-}
-
-/* BIG NUMBER */
-.big {
-    font-size:26px;
-    font-weight:bold;
-}
-
-.green { color:#22c55e; }
-.red { color:#ef4444; }
-
-</style>
+        .item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+        .green { color: #39d353; }
+        .red { color: #f85149; }
+        
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { text-align: left; color: #8b949e; font-weight: 400; padding-bottom: 10px; }
+        td { padding: 8px 0; border-bottom: 1px solid var(--border); }
+    </style>
 </head>
-
 <body>
 
 <div class="header">
     <div>
-        <b>AI Swing Trading Terminal</b>
-        <div class="muted">Live Alpaca Paper Trading Bot</div>
+        <div style="font-weight: 800; font-size: 18px;">QUANTUM<span style="color:var(--green)">BOT</span></div>
+        <div style="font-size: 11px; color: #8b949e;">CONNECTED TO ALPACA PAPER_TRADING</div>
     </div>
+    <div id="connection-status"><span class="status-dot"></span> LIVE</div>
 </div>
 
 <div class="grid">
-
-    <!-- ACCOUNT -->
+    <!-- LEFT: ACCOUNT -->
     <div class="card">
-        <h3>Account</h3>
-        <div class="big" id="equity">Loading...</div>
-        <div class="muted">Equity</div>
-
-        <br>
-
-        <div id="cash"></div>
-        <div class="muted">Cash</div>
+        <div class="card-header">Portfolio Overview</div>
+        <div class="card-body">
+            <div class="stat">
+                <div class="stat-label">Total Equity</div>
+                <div class="stat-val" id="equity">$0.00</div>
+            </div>
+            <div class="stat">
+                <div class="stat-label">Buying Power</div>
+                <div class="stat-val" id="cash" style="font-size: 18px;">$0.00</div>
+            </div>
+            <hr style="border:0; border-top:1px solid var(--border); margin: 20px 0;">
+            <div class="card-header" style="padding: 0 0 10px 0; background: none; border:0;">Watchlist Signals</div>
+            <div id="ranked"></div>
+        </div>
     </div>
 
-    <!-- SIGNALS -->
+    <!-- CENTER: POSITIONS -->
     <div class="card">
-        <h3>Top Opportunities</h3>
-        <div id="ranked"></div>
+        <div class="card-header">Open Positions</div>
+        <div class="card-body">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Asset</th>
+                        <th>Qty</th>
+                        <th>Market Value</th>
+                        <th>P/L Today</th>
+                    </tr>
+                </thead>
+                <tbody id="positions-list"></tbody>
+            </table>
+        </div>
     </div>
 
-    <!-- ACTIVITY -->
+    <!-- RIGHT: LOGS -->
     <div class="card">
-        <h3>Activity</h3>
-        <div id="activity"></div>
+        <div class="card-header">Execution Logs</div>
+        <div class="card-body" id="activity" style="font-family: monospace; font-size: 11px;">
+        </div>
     </div>
-
 </div>
 
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
-
 <script>
+    const socket = io();
 
-const socket = io();
+    socket.on("update", (d) => {
+        // Update Account
+        document.getElementById("equity").innerText = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(d.account.equity || 0);
+        document.getElementById("cash").innerText = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(d.account.cash || 0);
 
-socket.on("update", (d) => {
+        // Update Signals
+        document.getElementById("ranked").innerHTML = d.ranked.map(r => `
+            <div class="item">
+                <span><b>${r.symbol}</b> <span style="color:#8b949e; margin-left:5px;">$${r.price.toFixed(2)}</span></span>
+                <span class="${r.score > 0 ? 'green' : 'red'}">${r.score > 0 ? '▲' : '▼'} ${Math.abs(r.score).toFixed(2)}</span>
+            </div>
+        `).join("");
 
-    document.getElementById("equity").innerHTML =
-        "$" + (d.account.equity || "0");
+        // Update Positions
+        document.getElementById("positions-list").innerHTML = d.positions.map(p => `
+            <tr>
+                <td><b>${p.symbol}</b></td>
+                <td>${p.qty}</td>
+                <td>$${parseFloat(p.market_value).toFixed(2)}</td>
+                <td class="${parseFloat(p.unrealized_intraday_pl) >= 0 ? 'green' : 'red'}">
+                    $${parseFloat(p.unrealized_intraday_pl).toFixed(2)}
+                </td>
+            </tr>
+        `).join("");
 
-    document.getElementById("cash").innerHTML =
-        "$" + (d.account.cash || "0");
+        // Update Logs
+        document.getElementById("activity").innerHTML = d.activity.map(a => `
+            <div style="margin-bottom: 5px; color: ${a.includes('FAILED') ? '#f85149' : '#c9d1d9'}">
+                ${a}
+            </div>
+        `).join("");
+    });
 
-    document.getElementById("ranked").innerHTML =
-        d.ranked.map(r =>
-            `<div class="item">
-                <b>${r.symbol}</b>
-                <span class="${r.score > 0 ? 'green' : 'red'}">
-                    ${r.score.toFixed(2)}
-                </span>
-                <div class="muted">$${r.price}</div>
-            </div>`
-        ).join("");
-
-    document.getElementById("activity").innerHTML =
-        d.activity.map(a => `<div class="item">${a}</div>`).join("");
-
-});
-
+    socket.on('disconnect', () => {
+        document.querySelector('.status-dot').style.backgroundColor = '#da3633';
+        document.getElementById('connection-status').innerText = 'DISCONNECTED';
+    });
 </script>
-
 </body>
 </html>
 """
@@ -308,4 +275,4 @@ socket.on("update", (d) => {
 threading.Thread(target=engine, daemon=True).start()
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=PORT)
+    socketio.run(app, host="0.0.0.0", port=PORT, allow_unsafe_werkzeug=True)
