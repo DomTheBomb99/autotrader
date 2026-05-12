@@ -38,14 +38,14 @@ UNIVERSE = [
 
 bot = {
     "running": True,
-    "watchlist": [], # Starts empty, filled by the scanner
+    "watchlist": [], 
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"],
     "trade_amount_usd": 20.00,
     "last_eod_date": "",
     "last_scan_date": "",
     
-    "risk_pct": 2.0,    # Risk 2%
-    "reward_pct": 6.0   # Target 6%
+    "risk_pct": 2.0,    
+    "reward_pct": 6.0   
 }
 
 activity_log = ["System Initialized... Booting Scanner Protocols"]
@@ -64,7 +64,6 @@ def log_event(msg):
 def run_daily_scanner():
     log_event("📡 RUNNING MARKET SCANNER: Analyzing 30 volatile assets...")
     try:
-        # Get a snapshot of all stocks in our universe in ONE single API call
         url = f"{DATA_URL}/stocks/snapshots"
         params = {"symbols": ",".join(UNIVERSE), "feed": "iex"}
         
@@ -76,7 +75,6 @@ def run_daily_scanner():
         data = r.json()
         movers = []
         
-        # Calculate pre-market or daily momentum for each stock
         for symbol, snap in data.items():
             try:
                 prev_close = snap["prevDailyBar"]["c"]
@@ -88,10 +86,7 @@ def run_daily_scanner():
             except:
                 continue
                 
-        # Sort by highest positive percentage change
         movers.sort(key=lambda x: x["change"], reverse=True)
-        
-        # Grab the top 5
         top_5 = [m["symbol"] for m in movers[:5]]
         bot["watchlist"] = top_5
         
@@ -100,7 +95,6 @@ def run_daily_scanner():
         
     except Exception as e:
         log_event(f"SCANNER CRASH: {str(e)}")
-        # Fallback list if scanner fails
         bot["watchlist"] = ["TSLA", "NVDA", "AMD", "COIN", "MARA"]
         return False
 
@@ -195,13 +189,11 @@ def engine():
             clock_data = clock_req.json() if clock_req.status_code == 200 else {}
             is_open = clock_data.get("is_open", False)
             
-            # --- RUN SCANNER ONCE PER DAY ---
             curr_date = clock_data.get('timestamp', '')[:10]
             if is_open and bot["last_scan_date"] != curr_date:
                 run_daily_scanner()
                 bot["last_scan_date"] = curr_date
 
-            # --- EOD DAY TRADE PROTOCOL ---
             if is_open and "next_close" in clock_data:
                 now_t = datetime.fromisoformat(clock_data['timestamp'])
                 close_t = datetime.fromisoformat(clock_data['next_close'])
@@ -220,10 +212,8 @@ def engine():
                             log_event(f"SWING TRADE: Holding {p['symbol']} overnight.")
                     bot["last_eod_date"] = curr_date
 
-            # 2. Score Assets
             active_list = bot["watchlist"] if is_open else bot["crypto_watchlist"]
             
-            # If scanner hasn't run yet or failed, provide fallback
             if not active_list: 
                 active_list = ["TSLA", "NVDA", "AMD", "COIN", "MARA"]
 
@@ -238,7 +228,6 @@ def engine():
             pos = get_positions()
             orders = get_open_orders()
 
-            # 3. Execute Trades
             for r in ranked[:2]:
                 if r["score"] > 0.15:
                     already_hold = any(p.get('symbol') == r['symbol'] for p in pos)
@@ -261,7 +250,7 @@ def engine():
         time.sleep(3)
 
 # =========================================================
-# UI DASHBOARD
+# UI DASHBOARD (NOW MOBILE RESPONSIVE)
 # =========================================================
 @app.route("/")
 def home():
@@ -270,24 +259,44 @@ def home():
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>AI Trading Terminal</title>
 <style>
     :root { --bg: #0b1220; --card: #111827; --border: #1f2937; --text: #e5e7eb; --green: #22c55e; --red: #ef4444; --orange: #f59e0b; --blue: #3b82f6; }
-    body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system, sans-serif; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
     .header { display:flex; justify-content:space-between; align-items:center; padding:15px 25px; background:var(--card); border-bottom:1px solid var(--border); }
+    
+    /* The core layout */
     .grid { display:grid; grid-template-columns:300px 1fr 350px; gap:20px; padding:20px; height: calc(100vh - 80px); }
+    
     .card { background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:12px; padding:20px; display:flex; flex-direction:column; overflow:hidden; }
     .card-body { overflow-y:auto; flex-grow:1; }
     .muted { color:#9ca3af; font-size:11px; text-transform:uppercase; font-weight:800; letter-spacing:1px; margin-bottom:5px; }
     .big { font-size:32px; font-weight:bold; color:#fff; }
+    
     table { width:100%; border-collapse:collapse; font-size:13px; text-align:left; }
-    th { color:#9ca3af; padding-bottom:12px; border-bottom:1px solid var(--border); font-weight:600; }
-    td { padding:12px 0; border-bottom:1px solid var(--border); }
+    th { color:#9ca3af; padding-bottom:12px; border-bottom:1px solid var(--border); font-weight:600; white-space:nowrap; }
+    td { padding:12px 0; border-bottom:1px solid var(--border); white-space:nowrap; }
+    .table-container { overflow-x: auto; } /* Lets the table scroll left/right on tiny screens */
+    
     .item { display:flex; justify-content:space-between; padding:12px 0; border-bottom:1px solid var(--border); font-size:14px; }
     .pill { background:#4b5563; color:#fff; padding:4px 10px; border-radius:20px; font-size:11px; font-weight:900; letter-spacing:0.5px;}
     .pill-pending { padding:3px 8px; border-radius:6px; font-size:10px; font-weight:bold; margin-left:8px; }
-    ::-webkit-scrollbar { width: 6px; }
+    
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+
+    /* --- MOBILE RESPONSIVENESS (The real fix) --- */
+    @media (max-width: 1024px) {
+        .header { flex-direction: column; align-items: flex-start; gap: 15px; }
+        .grid { 
+            grid-template-columns: 1fr; /* Stacks everything into 1 column */
+            height: auto; 
+            padding: 10px;
+        }
+        .card { max-height: 500px; margin-bottom: 15px; } /* Stops cards from getting too tall */
+        #status { align-self: flex-start; }
+    }
 </style>
 </head>
 <body>
@@ -317,7 +326,7 @@ def home():
 
     <div class="card">
         <div class="muted" style="margin-bottom:15px;">Live 1:3 Risk/Reward Positions</div>
-        <div class="card-body">
+        <div class="card-body table-container">
             <table>
                 <thead>
                     <tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop (-2%)</th><th>Target (+6%)</th></tr>
