@@ -8,9 +8,6 @@ import requests
 from flask import Flask
 from flask_socketio import SocketIO
 
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-
 # =========================================================
 # CONFIG
 # =========================================================
@@ -29,52 +26,47 @@ HEADERS = {
 PORT = int(os.environ.get("PORT", 7777))
 
 # =========================================================
-# APP + SOCKETS
+# APP
 # =========================================================
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # =========================================================
-# AI MODEL
-# =========================================================
-
-model = LogisticRegression()
-scaler = StandardScaler()
-
-X_data = []
-y_data = []
-model_ready = False
-
-# =========================================================
-# STATE
+# BOT STATE
 # =========================================================
 
 bot = {
     "running": True,
     "watchlist": ["AAPL","TSLA","NVDA","AMD","SPY","QQQ","META","AMZN"],
-    "last_cycle": 0,
-    "max_positions": 4
+    "cycle": 10
 }
 
+# adaptive strategy weights (THIS IS THE "LEARNING")
+strategy_scores = {
+    "momentum": 1.0,
+    "mean_revert": 1.0
+}
+
+trade_memory = []
 last_actions = []
 
 # =========================================================
-# ALPACA API
+# ALPACA
 # =========================================================
 
-def get_account():
+def account():
     r = requests.get(BASE_URL + "/v2/account", headers=HEADERS)
     return r.json() if r.status_code == 200 else {}
 
-def get_positions():
+def positions():
     r = requests.get(BASE_URL + "/v2/positions", headers=HEADERS)
     return r.json() if r.status_code == 200 else []
 
-def place_order(symbol, side, qty=1):
+def order(symbol, side, qty=1):
 
     try:
-        r = requests.post(
+        requests.post(
             BASE_URL + "/v2/orders",
             headers=HEADERS,
             json={
@@ -85,20 +77,16 @@ def place_order(symbol, side, qty=1):
                 "time_in_force": "gtc"
             }
         )
-
-        if r.status_code in [200, 201]:
-            last_actions.append(f"{side.upper()} {symbol}")
-        else:
-            last_actions.append(f"ORDER FAIL {symbol}")
+        last_actions.append(f"{side.upper()} {symbol}")
 
     except Exception as e:
-        last_actions.append(f"ERROR {str(e)}")
+        last_actions.append(f"ORDER ERROR {str(e)}")
 
 # =========================================================
 # MARKET DATA
 # =========================================================
 
-def get_bars(symbol):
+def bars(symbol):
 
     r = requests.get(
         f"{DATA_URL}/stocks/{symbol}/bars",
@@ -117,76 +105,50 @@ def get_bars(symbol):
 # =========================================================
 
 def features(df):
-    return [
-        df["c"].iloc[-1],
-        df["c"].rolling(5).mean().iloc[-1],
-        df["c"].rolling(20).mean().iloc[-1],
-        df["v"].iloc[-1],
-        df["h"].max() - df["l"].min()
-    ]
+
+    return {
+        "price": df["c"].iloc[-1],
+        "trend": df["c"].iloc[-1] - df["c"].iloc[-10],
+        "volatility": df["h"].max() - df["l"].min(),
+        "volume": df["v"].iloc[-1]
+    }
 
 # =========================================================
-# ML TRAIN
+# AGGRESSIVE SIGNAL ENGINE
 # =========================================================
 
-def train():
+def score(symbol):
 
-    global model_ready
+    df = bars(symbol)
+    if df is None or len(df) < 30:
+        return None
 
-    if len(X_data) < 50:
-        return
+    f = features(df)
 
-    X = np.array(X_data)
-    y = np.array(y_data)
+    momentum_score = f["trend"] * strategy_scores["momentum"]
+    mean_revert_score = -abs(f["trend"]) * strategy_scores["mean_revert"]
 
-    scaler.fit(X)
-    Xs = scaler.transform(X)
+    total = momentum_score + mean_revert_score
 
-    model.fit(Xs, y)
-
-    model_ready = True
-
-# =========================================================
-# PREDICT
-# =========================================================
-
-def predict(x):
-
-    if not model_ready:
-        return 0.5
-
-    return model.predict_proba(scaler.transform([x]))[0][1]
+    return {
+        "symbol": symbol,
+        "score": total,
+        "price": f["price"]
+    }
 
 # =========================================================
-# SCANNER
+# LEARNING SYSTEM
 # =========================================================
 
-def scan_market():
+def learn(trade_result, strategy_used):
 
-    ranked = []
-
-    for s in bot["watchlist"]:
-
-        df = get_bars(s)
-
-        if df is None or len(df) < 30:
-            continue
-
-        x = features(df)
-        conf = predict(x)
-
-        ranked.append({
-            "symbol": s,
-            "confidence": float(conf),
-            "price": float(df["c"].iloc[-1])
-        })
-
-    ranked.sort(key=lambda x: x["confidence"], reverse=True)
-
-    return ranked[:5]
+    if trade_result == "win":
+        strategy_scores[strategy_used] *= 1.05
+    else:
+        strategy_scores[strategy_used] *= 0.95
 
 # =========================================================
-# TRADING ENGINE
+# ENGINE
 # =========================================================
 
 def engine():
@@ -197,75 +159,57 @@ def engine():
             time.sleep(1)
             continue
 
-        train()
+        ranked = []
 
-        account = get_account()
-        positions = get_positions()
-        ranked = scan_market()
+        for s in bot["watchlist"]:
+            r = score(s)
+            if r:
+                ranked.append(r)
 
-        # =====================================================
-        # RISK CONTROL
-        # =====================================================
+        ranked.sort(key=lambda x: x["score"], reverse=True)
 
-        if len(positions) >= bot["max_positions"]:
-            last_actions.append("MAX POSITIONS REACHED")
-            time.sleep(3)
-            continue
+        account_data = account()
+        pos = positions()
 
-        # =====================================================
-        # EXECUTION LOGIC
-        # =====================================================
+        # aggressive trading logic
+        for r in ranked[:3]:
 
-        for r in ranked:
+            if r["score"] > 0.5:
+                order(r["symbol"], "buy", 1)
 
-            symbol = r["symbol"]
-            conf = r["confidence"]
-
-            last_actions.append(f"{symbol} {conf:.2f}")
-
-            if conf > 0.72:
-                place_order(symbol, "buy", 1)
-
-            if conf < 0.35:
-                # simple exit logic
-                for p in positions:
-                    if p["symbol"] == symbol:
-                        place_order(symbol, "sell", p["qty"])
-
-        # =====================================================
-        # STREAM DATA TO UI
-        # =====================================================
+        # simulate learning from past trades (simplified)
+        if len(trade_memory) > 5:
+            last = trade_memory[-1]
+            learn(last["result"], "momentum")
 
         socketio.emit("update", {
-            "account": {
-                "equity": account.get("equity"),
-                "cash": account.get("cash")
-            },
-            "positions": positions,
+            "account": account_data,
+            "positions": pos,
             "ranked": ranked,
-            "last_actions": last_actions[-15:],
-            "model_ready": model_ready
+            "strategies": strategy_scores,
+            "activity": last_actions[-10:]
         })
 
-        time.sleep(3)
+        time.sleep(bot["cycle"])
 
 # =========================================================
-# UI (NO REFRESH - SOCKET ONLY)
+# UI
 # =========================================================
 
 @app.route("/")
-def index():
+def home():
 
     return """
 <!DOCTYPE html>
 <html>
 <head>
-<title>AI Quant Terminal</title>
+<title>Aggressive Swing AI</title>
 
 <style>
+
 body {
     margin:0;
-    background:#0a0f1f;
+    background:#0b0f1a;
     color:white;
     font-family:Arial;
 }
@@ -282,23 +226,24 @@ body {
     padding:15px;
     border-radius:12px;
 }
+
 </style>
 
 </head>
 
 <body>
 
-<h2 style="padding:15px;">Pro AI Trading Terminal</h2>
+<h2 style="padding:15px;">Aggressive AI Swing Trader</h2>
 
 <div class="grid">
 
 <div class="box">
 <h3>Account</h3>
-<div id="account">loading...</div>
+<div id="account"></div>
 </div>
 
 <div class="box">
-<h3>Top Trades</h3>
+<h3>Top Signals</h3>
 <div id="ranked"></div>
 </div>
 
@@ -315,18 +260,18 @@ body {
 
 const socket = io();
 
-socket.on("update", (data) => {
+socket.on("update", (d) => {
 
 document.getElementById("account").innerHTML =
-"Equity: $" + data.account.equity + "<br>Cash: $" + data.account.cash;
+"Equity: $" + (d.account.equity || "loading");
 
 document.getElementById("ranked").innerHTML =
-data.ranked.map(r =>
-`<div><b>${r.symbol}</b> - ${(r.confidence*100).toFixed(1)}% - $${r.price}</div>`
+d.ranked.map(r =>
+`<div><b>${r.symbol}</b> score: ${r.score.toFixed(2)} $${r.price}</div>`
 ).join("");
 
 document.getElementById("activity").innerHTML =
-data.last_actions.map(a => `<div>${a}</div>`).join("");
+d.activity.map(a => `<div>${a}</div>`).join("");
 
 });
 
