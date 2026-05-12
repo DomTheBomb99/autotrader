@@ -2,7 +2,6 @@ import os
 import time
 import threading
 import requests
-import numpy as np
 import pandas as pd
 from flask import Flask
 from flask_socketio import SocketIO
@@ -23,102 +22,136 @@ HEADERS = {
 
 PORT = int(os.environ.get("PORT", 7777))
 
-# =========================================================
-# APP & STATE
-# =========================================================
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 bot = {
     "running": True,
-    "watchlist": ["AAPL","TSLA","NVDA","AMD","SPY","QQQ","META","AMZN"],
+    "watchlist": ["AAPL", "TSLA", "NVDA", "AMD", "SPY", "QQQ"],
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"]
 }
 
-last_actions = ["Bot initialized on Railway... Connecting to Alpaca"]
+# Keep track of recent logs to display on the UI
+activity_log = ["System Initialized... Connecting to Alpaca"]
+
+def log_event(msg):
+    timestamp = time.strftime('%H:%M:%S')
+    full_msg = f"[{timestamp}] {msg}"
+    print(full_msg)
+    activity_log.append(full_msg)
+    if len(activity_log) > 20:
+        activity_log.pop(0)
 
 # =========================================================
 # ALPACA API HELPERS
 # =========================================================
-def account():
-    r = requests.get(BASE_URL + "/v2/account", headers=HEADERS)
-    return r.json() if r.status_code == 200 else {}
+def get_account():
+    r = requests.get(f"{BASE_URL}/v2/account", headers=HEADERS)
+    if r.status_code != 200:
+        log_event(f"Account API Error: {r.text}")
+        return {}
+    return r.json()
 
-def positions():
-    r = requests.get(BASE_URL + "/v2/positions", headers=HEADERS)
-    return r.json() if r.status_code == 200 else []
+def get_positions():
+    r = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS)
+    if r.status_code != 200:
+        return []
+    return r.json()
 
-def order(symbol, side="buy", qty=1):
+def place_order(symbol, qty, current_price):
     try:
-        r = requests.post(
-            BASE_URL + "/v2/orders",
-            headers=HEADERS,
-            json={
-                "symbol": symbol,
-                "qty": qty,
-                "side": side,
-                "type": "market",
-                "time_in_force": "gtc"
+        # Calculate 5% Take Profit and 2% Stop Loss
+        take_profit_price = round(current_price * 1.05, 2)
+        stop_loss_price = round(current_price * 0.98, 2)
+
+        payload = {
+            "symbol": symbol,
+            "qty": qty,
+            "side": "buy",
+            "type": "market",
+            "time_in_force": "gtc",
+            "order_class": "bracket",
+            "take_profit": {
+                "limit_price": take_profit_price
+            },
+            "stop_loss": {
+                "stop_price": stop_loss_price,
+                "limit_price": stop_loss_price
             }
-        )
+        }
+
+        r = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
+        
         if r.status_code == 200:
-            last_actions.append(f"[{time.strftime('%H:%M:%S')}] {side.upper()} {symbol} SUCCESS")
+            log_event(f"BOUGHT {qty} {symbol} | TP: ${take_profit_price} | SL: ${stop_loss_price}")
         else:
-            last_actions.append(f"[{time.strftime('%H:%M:%S')}] ORDER FAILED: {r.text}")
+            log_event(f"ORDER REJECTED {symbol}: {r.json().get('message', r.text)}")
     except Exception as e:
-        last_actions.append(f"ORDER ERROR {str(e)}")
+        log_event(f"ORDER EXCEPTION: {str(e)}")
 
 # =========================================================
-# MARKET DATA & ORIGINAL ML SIGNAL ENGINE
+# MARKET DATA & AI SIGNAL ENGINE
 # =========================================================
 def get_bars(symbol):
     is_crypto = "/" in symbol
-    url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/{symbol}/bars"
+    if is_crypto:
+        url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars"
+        params = {"symbols": symbol, "timeframe": "1Min", "limit": 20}
+    else:
+        url = f"{DATA_URL}/stocks/{symbol}/bars"
+        # feed=iex is REQUIRED for free Alpaca accounts
+        params = {"timeframe": "1Min", "limit": 20, "feed": "iex"}
     
     try:
-        r = requests.get(url, headers=HEADERS, params={"timeframe": "1Min", "limit": 50})
+        r = requests.get(url, headers=HEADERS, params=params)
         if r.status_code != 200:
             return None
-        data = r.json().get("bars", [])
-        return pd.DataFrame(data) if data else None
+            
+        data = r.json()
+        bars = data.get("bars", {})
+        
+        # Crypto returns nested dict, stocks return list. Handle both.
+        if isinstance(bars, dict):
+            bars = bars.get(symbol, [])
+            
+        return pd.DataFrame(bars) if len(bars) > 0 else None
     except:
         return None
 
 def score_symbol(symbol):
     df = get_bars(symbol)
-    if df is None or len(df) < 20:
+    if df is None or len(df) < 10:
         return None
 
-    # --- YOUR ML LOGIC GOES HERE ---
-    price = df["c"].iloc[-1]
-    trend = df["c"].iloc[-1] - df["c"].iloc[-10]
+    current_price = float(df["c"].iloc[-1])
+    past_price = float(df["c"].iloc[-10])
     
-    score = trend
-    # --- END ML LOGIC ---
+    # NEW LOGIC: Calculate Percentage Change over 10 minutes
+    # If it moves up by 0.1%, it's considered a buy signal
+    percent_change = ((current_price - past_price) / past_price) * 100
 
     return {
         "symbol": symbol,
-        "score": float(score),
-        "price": float(price)
+        "score": percent_change,
+        "price": current_price
     }
 
 # =========================================================
-# TRADING ENGINE
+# TRADING ENGINE THREAD
 # =========================================================
 def engine():
+    log_event("Trading Engine Started...")
     while True:
-        if not bot["running"]:
-            time.sleep(1)
-            continue
-
         try:
-            # Check market clock to swap lists
-            clock_req = requests.get(BASE_URL + "/v2/clock", headers=HEADERS)
+            # 1. Check Market Status
+            clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS)
             is_open = clock_req.json().get("is_open", False) if clock_req.status_code == 200 else False
             
+            # Switch to Crypto if market is closed
             active_list = bot["watchlist"] if is_open else bot["crypto_watchlist"]
             ranked = []
 
+            # 2. Score Assets
             for s in active_list:
                 r = score_symbol(s)
                 if r:
@@ -126,66 +159,76 @@ def engine():
 
             ranked.sort(key=lambda x: x["score"], reverse=True)
 
-            acc = account()
-            pos = positions()
+            # 3. Fetch Account & Positions
+            acc = get_account()
+            pos = get_positions()
 
-            # simple execution logic
+            # 4. Execute Trades (Buy if trending > 0.1%)
             for r in ranked[:2]:
-                if r["score"] > 0.5:
-                    # Basic check to avoid buying the same thing infinitely
-                    if not any(p.get('symbol') == r['symbol'] for p in pos):
-                        order(r["symbol"], "buy", 1)
+                if r["score"] > 0.1:
+                    # Prevent buying if we already hold it
+                    already_hold = any(p.get('symbol') == r['symbol'] for p in pos)
+                    if not already_hold:
+                        place_order(r["symbol"], 1, r["price"])
 
-            # stream updates to UI
+            # 5. Broadcast Data to UI
             socketio.emit("update", {
                 "account": {
-                    "equity": acc.get("equity", "0"),
-                    "cash": acc.get("buying_power", "0")
+                    "equity": acc.get("equity", "0.00"),
+                    "cash": acc.get("buying_power", "0.00")
                 },
-                "positions": pos if isinstance(pos, list) else [],
+                "positions": pos,
                 "ranked": ranked[:8],
-                "activity": last_actions[-12:][::-1],
-                "market_status": "OPEN" if is_open else "CLOSED (CRYPTO MODE)"
+                "activity": activity_log[::-1], # Reverse so newest is on top
+                "market_status": "MARKET OPEN" if is_open else "MARKET CLOSED (CRYPTO ACTIVE)"
             })
 
         except Exception as e:
-            print(f"Engine Loop Error: {e}")
+            log_event(f"CRITICAL ENGINE ERROR: {e}")
 
-        time.sleep(5)
+        # Aggressive 3-second update loop
+        time.sleep(3)
 
 # =========================================================
-# UI
+# UI DASHBOARD
 # =========================================================
 @app.route("/")
 def home():
     return """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+<meta charset="UTF-8">
 <title>AI Trading Terminal</title>
 <style>
     :root { --bg: #0b1220; --card: #111827; --border: #1f2937; --text: #e5e7eb; --green: #22c55e; --red: #ef4444; }
-    body { margin:0; background:var(--bg); color:var(--text); font-family:Arial, sans-serif; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
     .header { display:flex; justify-content:space-between; align-items:center; padding:15px 25px; background:var(--card); border-bottom:1px solid var(--border); }
-    .grid { display:grid; grid-template-columns:300px 1fr 300px; gap:20px; padding:20px; height: calc(100vh - 100px); }
-    .card { background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:12px; padding:20px; overflow-y:auto; }
-    .muted { color:#9ca3af; font-size:12px; text-transform:uppercase; font-weight:bold; letter-spacing:1px; margin-bottom:5px; }
-    .big { font-size:28px; font-weight:bold; margin-bottom:15px; }
-    .item { display:flex; justify-content:space-between; padding:10px 0; border-bottom:1px solid var(--border); font-size:14px; }
-    table { width:100%; border-collapse:collapse; font-size:13px; }
-    th { text-align:left; color:#9ca3af; padding-bottom:10px; border-bottom:1px solid var(--border); }
+    .grid { display:grid; grid-template-columns:300px 1fr 350px; gap:20px; padding:20px; height: calc(100vh - 80px); }
+    .card { background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:12px; padding:20px; display:flex; flex-direction:column; overflow:hidden; }
+    .card-body { overflow-y:auto; flex-grow:1; }
+    .muted { color:#9ca3af; font-size:11px; text-transform:uppercase; font-weight:800; letter-spacing:1px; margin-bottom:5px; }
+    .big { font-size:32px; font-weight:bold; margin-bottom:15px; color:#fff; }
+    
+    table { width:100%; border-collapse:collapse; font-size:13px; text-align:left; }
+    th { color:#9ca3af; padding-bottom:12px; border-bottom:1px solid var(--border); font-weight:600; }
     td { padding:12px 0; border-bottom:1px solid var(--border); }
-    .pill { background:var(--green); color:#000; padding:3px 8px; border-radius:12px; font-size:11px; font-weight:bold; }
+    
+    .item { display:flex; justify-content:space-between; padding:12px 0; border-bottom:1px solid var(--border); font-size:14px; }
+    .pill { background:var(--green); color:#000; padding:4px 10px; border-radius:20px; font-size:11px; font-weight:900; letter-spacing:0.5px;}
+    
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
 </style>
 </head>
 <body>
 
 <div class="header">
     <div>
-        <span style="font-weight:900; font-size:18px;">AI SWING TERMINAL</span>
-        <span id="mkt" style="margin-left:15px; font-size:12px; color:#9ca3af;">SYNCING...</span>
+        <span style="font-weight:900; font-size:18px; tracking:wide;">QUANTUM<span style="color:var(--green)">BOT</span></span>
+        <span id="mkt" style="margin-left:20px; font-size:12px; color:#9ca3af; font-weight:bold;">INITIALIZING...</span>
     </div>
-    <div class="pill" id="status">LIVE DATA</div>
+    <div class="pill" id="status">LIVE SYNC</div>
 </div>
 
 <div class="grid">
@@ -193,23 +236,36 @@ def home():
         <div class="muted">Net Equity</div>
         <div class="big" id="equity">$0.00</div>
         <div class="muted">Buying Power</div>
-        <div id="cash" style="font-size:18px; font-weight:bold; margin-bottom:25px;">$0.00</div>
+        <div id="cash" style="font-size:20px; font-weight:bold; margin-bottom:25px; color:#9ca3af;">$0.00</div>
         
-        <div class="muted">Top Opportunities</div>
-        <div id="ranked"></div>
+        <hr style="border:0; border-top:1px solid var(--border); margin-bottom:20px;">
+        
+        <div class="muted" style="margin-bottom:10px;">Live AI Momentum (% Change)</div>
+        <div class="card-body" id="ranked"></div>
     </div>
 
     <div class="card">
-        <div class="muted">Active Positions</div>
-        <table>
-            <thead><tr><th>Symbol</th><th>Qty</th><th>Value</th><th>P/L Today</th></tr></thead>
-            <tbody id="pos-table"></tbody>
-        </table>
+        <div class="muted" style="margin-bottom:15px;">Live Holdings & Stop Losses</div>
+        <div class="card-body">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Asset</th>
+                        <th>Qty</th>
+                        <th>Entry Price</th>
+                        <th>Current Price</th>
+                        <th>P/L</th>
+                        <th>Stop Loss</th>
+                    </tr>
+                </thead>
+                <tbody id="pos-table"></tbody>
+            </table>
+        </div>
     </div>
 
     <div class="card">
-        <div class="muted">Execution Log</div>
-        <div id="logs" style="font-family:monospace; font-size:12px; margin-top:10px; line-height:1.6;"></div>
+        <div class="muted" style="margin-bottom:15px;">System Execution Log</div>
+        <div class="card-body" id="logs" style="font-family:'Courier New', monospace; font-size:12px; line-height:1.6; color:#a1a1aa;"></div>
     </div>
 </div>
 
@@ -217,30 +273,54 @@ def home():
 <script>
     const socket = io();
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+    const pct = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2 });
 
     socket.on("update", (d) => {
+        // Update Account
         document.getElementById("equity").innerText = f.format(d.account.equity || 0);
         document.getElementById("cash").innerText = f.format(d.account.cash || 0);
         document.getElementById("mkt").innerText = d.market_status;
 
-        document.getElementById("pos-table").innerHTML = d.positions.map(p => `
-            <tr>
-                <td><b>${p.symbol}</b></td>
-                <td>${p.qty}</td>
-                <td>${f.format(p.market_value)}</td>
-                <td style="color:${p.unrealized_intraday_pl >= 0 ? '#22c55e' : '#ef4444'}">
-                    ${f.format(p.unrealized_intraday_pl)}
-                </td>
-            </tr>`).join("");
+        // Update Positions Table
+        if (d.positions.length === 0) {
+            document.getElementById("pos-table").innerHTML = "<tr><td colspan='6' style='text-align:center; color:#6b7280; padding-top:20px;'>No active positions. Waiting for signals...</td></tr>";
+        } else {
+            document.getElementById("pos-table").innerHTML = d.positions.map(p => {
+                const isProfit = p.unrealized_intraday_pl >= 0;
+                const plColor = isProfit ? '#22c55e' : '#ef4444';
+                
+                // Calculate dynamic stop loss display (2% below entry)
+                const entry = parseFloat(p.avg_entry_price);
+                const stopLoss = entry * 0.98;
 
+                return `
+                <tr>
+                    <td><b style="color:#fff;">${p.symbol}</b></td>
+                    <td>${p.qty}</td>
+                    <td>${f.format(entry)}</td>
+                    <td>${f.format(p.current_price)}</td>
+                    <td style="color:${plColor}; font-weight:bold;">
+                        ${f.format(p.unrealized_intraday_pl)} <br>
+                        <span style="font-size:11px;">(${pct.format(p.unrealized_intraday_plpc)})</span>
+                    </td>
+                    <td style="color:#ef4444;">${f.format(stopLoss)}</td>
+                </tr>`;
+            }).join("");
+        }
+
+        // Update Signals
         document.getElementById("ranked").innerHTML = d.ranked.map(r => `
             <div class="item">
-                <span><b>${r.symbol}</b></span>
-                <span style="color:${r.score >= 0 ? '#22c55e' : '#ef4444'}">${r.score.toFixed(3)}</span>
+                <span style="color:#fff;"><b>${r.symbol}</b> <span style="font-size:11px; color:#6b7280; margin-left:5px;">${f.format(r.price)}</span></span>
+                <span style="color:${r.score >= 0 ? '#22c55e' : '#ef4444'}; font-weight:bold;">${r.score > 0 ? '+' : ''}${r.score.toFixed(2)}%</span>
             </div>`).join("");
 
+        // Update Logs
         document.getElementById("logs").innerHTML = d.activity.map(a => `
-            <div style="margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid #1f2937;">${a}</div>
+            <div style="margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid #1f2937;">
+                ${a.includes('ERROR') || a.includes('REJECTED') ? `<span style="color:#ef4444">${a}</span>` : 
+                  a.includes('BOUGHT') ? `<span style="color:#22c55e">${a}</span>` : a}
+            </div>
         `).join("");
     });
 </script>
@@ -252,7 +332,6 @@ def home():
 # =========================================================
 # START
 # =========================================================
-threading.Thread(target=engine, daemon=True).start()
-
 if __name__ == "__main__":
+    threading.Thread(target=engine, daemon=True).start()
     socketio.run(app, host="0.0.0.0", port=PORT)
