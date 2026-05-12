@@ -1,11 +1,12 @@
 import eventlet
-eventlet.monkey_patch() # THIS MUST BE AT THE VERY TOP FOR RAILWAY TO WORK
+eventlet.monkey_patch()
 
 import os
 import time
 import threading
 import requests
 import pandas as pd
+from datetime import datetime
 from flask import Flask
 from flask_socketio import SocketIO
 
@@ -26,13 +27,14 @@ HEADERS = {
 PORT = int(os.environ.get("PORT", 7777))
 
 app = Flask(__name__)
-# Added ping_interval settings to keep Railway connections alive
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet", ping_timeout=60, ping_interval=15)
 
 bot = {
     "running": True,
-    "watchlist": ["AAPL", "TSLA", "NVDA", "AMD", "SPY", "QQQ"],
-    "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"]
+    "watchlist": ["AAPL", "TSLA", "NVDA", "AMD", "SPY", "QQQ", "GME"],
+    "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
+    "trade_amount_usd": 20.00, # Buys $20 worth of the asset (Fractional Shares)
+    "last_eod_date": ""
 }
 
 activity_log = ["System Initialized... Booting Cloud Engine"]
@@ -51,26 +53,27 @@ def log_event(msg):
 def get_account():
     try:
         r = requests.get(f"{BASE_URL}/v2/account", headers=HEADERS)
-        if r.status_code != 200:
-            log_event(f"Account Sync Error: {r.text}")
-            return {"equity": "0.00", "buying_power": "0.00", "last_equity": "0.00"}
-        return r.json()
-    except Exception as e:
-        log_event(f"Network Error: {str(e)}")
-        return {"equity": "0.00", "buying_power": "0.00", "last_equity": "0.00"}
+        return r.json() if r.status_code == 200 else {"equity": "0.00", "buying_power": "0.00", "last_equity": "0.00"}
+    except: return {"equity": "0.00", "buying_power": "0.00", "last_equity": "0.00"}
 
 def get_positions():
     try:
         r = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS)
-        if r.status_code != 200:
-            return []
-        return r.json()
-    except:
-        return []
+        return r.json() if r.status_code == 200 else []
+    except: return []
 
-def place_order(symbol, qty, current_price):
+def get_open_orders():
     try:
-        # 1. First, buy the asset at Market Price
+        r = requests.get(f"{BASE_URL}/v2/orders?status=open", headers=HEADERS)
+        return r.json() if r.status_code == 200 else []
+    except: return []
+
+def place_order(symbol, current_price):
+    try:
+        # Calculate Fractional Quantity (e.g., $20.00 / $150.00 = 0.1333 shares)
+        raw_qty = bot["trade_amount_usd"] / current_price
+        qty = round(raw_qty, 5) # Alpaca accepts up to 9 decimals, 5 is safe
+
         buy_payload = {
             "symbol": symbol,
             "qty": qty,
@@ -81,32 +84,27 @@ def place_order(symbol, qty, current_price):
         r_buy = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=buy_payload)
         
         if r_buy.status_code == 200:
-            log_event(f"BOUGHT {qty} {symbol} at ~${current_price}")
+            log_event(f"BOUGHT {qty} {symbol} (~${bot['trade_amount_usd']})")
             
-            # 2. Immediately attach a Trailing Stop Sell Order
+            # Attach 2% Trailing Stop
             trail_payload = {
                 "symbol": symbol,
                 "qty": qty,
                 "side": "sell",
                 "type": "trailing_stop",
-                "trail_percent": 2.0,  # Trails 2% behind the highest price
+                "trail_percent": 2.0,
                 "time_in_force": "gtc"
             }
-            
-            # Tiny delay to let Alpaca register the buy before we place the sell
-            time.sleep(1) 
+            time.sleep(1) # Let order register
             r_trail = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=trail_payload)
-            
             if r_trail.status_code == 200:
                 log_event(f"ATTACHED 2% Trailing Stop to {symbol}")
-            else:
-                log_event(f"TRAIL STOP FAILED {symbol}: {r_trail.json().get('message', r_trail.text)}")
-                
         else:
-            log_event(f"REJECTED {symbol}: {r_buy.json().get('message', r_buy.text)}")
+            log_event(f"REJECTED {symbol}: {r_buy.json().get('message', 'Unknown Error')}")
             
     except Exception as e:
-        log_event(f"ORDER FAILED: {str(e)}")
+        log_event(f"ORDER CRASH: {str(e)}")
+
 # =========================================================
 # MARKET DATA & AI SIGNAL ENGINE
 # =========================================================
@@ -121,30 +119,19 @@ def get_bars(symbol):
     
     try:
         r = requests.get(url, headers=HEADERS, params=params)
-        if r.status_code != 200:
-            return None
-            
+        if r.status_code != 200: return None
         data = r.json()
         bars = data.get("bars", {})
-        
-        if isinstance(bars, dict):
-            bars = bars.get(symbol, [])
-            
+        if isinstance(bars, dict): bars = bars.get(symbol, [])
         return pd.DataFrame(bars) if len(bars) > 0 else None
-    except:
-        return None
+    except: return None
 
 def score_symbol(symbol):
     df = get_bars(symbol)
-    if df is None or len(df) < 10:
-        return None
-
+    if df is None or len(df) < 10: return None
     current_price = float(df["c"].iloc[-1])
     past_price = float(df["c"].iloc[-10])
-    
-    # Percentage Change logic
     percent_change = ((current_price - past_price) / past_price) * 100
-
     return {"symbol": symbol, "score": percent_change, "price": current_price}
 
 # =========================================================
@@ -154,49 +141,70 @@ def engine():
     log_event("Alpaca Connection Established. Scanning markets...")
     while True:
         try:
-            # 1. Market Status
+            # 1. Market Clock & EOD Logic
             clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS)
-            is_open = clock_req.json().get("is_open", False) if clock_req.status_code == 200 else False
+            clock_data = clock_req.json() if clock_req.status_code == 200 else {}
+            is_open = clock_data.get("is_open", False)
             
-            active_list = bot["watchlist"] if is_open else bot["crypto_watchlist"]
-            ranked = []
+            # --- SWING VS DAY TRADE DECISION ENGINE ---
+            if is_open and "next_close" in clock_data:
+                now_t = datetime.fromisoformat(clock_data['timestamp'])
+                close_t = datetime.fromisoformat(clock_data['next_close'])
+                mins_to_close = (close_t - now_t).total_seconds() / 60.0
+                curr_date = str(now_t.date())
+                
+                # If less than 15 mins to market close, evaluate holding risk
+                if 0 < mins_to_close < 15 and bot["last_eod_date"] != curr_date:
+                    log_event("🔔 15 MIN TO CLOSE: Evaluating Swing vs Day Trades...")
+                    pos_to_eval = get_positions()
+                    for p in pos_to_eval:
+                        # Skip crypto for EOD logic since it trades 24/7
+                        if "USD" in p['symbol']: continue 
+                        
+                        pl_pct = float(p.get("unrealized_intraday_plpc", 0))
+                        if pl_pct < 0:
+                            log_event(f"DAY TRADE CLOSE: Selling {p['symbol']} to avoid overnight gap down.")
+                            requests.delete(f"{BASE_URL}/v2/positions/{p['symbol']}", headers=HEADERS)
+                        else:
+                            log_event(f"SWING TRADE: Holding {p['symbol']} overnight for continued gains.")
+                    bot["last_eod_date"] = curr_date
 
             # 2. Score Assets
+            active_list = bot["watchlist"] if is_open else bot["crypto_watchlist"]
+            ranked = []
             for s in active_list:
                 r = score_symbol(s)
-                if r:
-                    ranked.append(r)
+                if r: ranked.append(r)
 
             ranked.sort(key=lambda x: x["score"], reverse=True)
 
             # 3. Fetch Portfolio
             acc = get_account()
             pos = get_positions()
+            orders = get_open_orders()
 
-            # 4. Execute (0.1% momentum trigger)
+            # 4. Execute Trades (Buy if trending > 0.1%)
             for r in ranked[:2]:
                 if r["score"] > 0.1:
                     already_hold = any(p.get('symbol') == r['symbol'] for p in pos)
-                    if not already_hold:
-                        place_order(r["symbol"], 1, r["price"])
+                    already_pending = any(o.get('symbol') == r['symbol'] for o in orders)
+                    if not already_hold and not already_pending:
+                        place_order(r["symbol"], r["price"])
 
             # 5. Broadcast to UI
             socketio.emit("update", {
-                "account": {
-                    "equity": acc.get("equity", "0.00"), 
-                    "cash": acc.get("buying_power", "0.00"),
-                    "last_equity": acc.get("last_equity", "0.00") # Grab yesterday's close for math
-                },
+                "account": acc,
                 "positions": pos,
+                "orders": orders,
                 "ranked": ranked[:8],
                 "activity": activity_log[::-1],
                 "market_status": "MARKET OPEN" if is_open else "MARKET CLOSED (CRYPTO ACTIVE)"
             })
 
         except Exception as e:
-            log_event(f"ENGINE CRASH LOOP: {str(e)}")
+            log_event(f"ENGINE LOOP ERROR: {str(e)}")
 
-        time.sleep(3) # Send data to UI every 3 seconds
+        time.sleep(3)
 
 # =========================================================
 # UI DASHBOARD
@@ -211,7 +219,7 @@ def home():
 <title>AI Trading Terminal</title>
 <style>
     :root { --bg: #0b1220; --card: #111827; --border: #1f2937; --text: #e5e7eb; --green: #22c55e; --red: #ef4444; --orange: #f59e0b; }
-    body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system, sans-serif; }
     .header { display:flex; justify-content:space-between; align-items:center; padding:15px 25px; background:var(--card); border-bottom:1px solid var(--border); }
     .grid { display:grid; grid-template-columns:300px 1fr 350px; gap:20px; padding:20px; height: calc(100vh - 80px); }
     .card { background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:12px; padding:20px; display:flex; flex-direction:column; overflow:hidden; }
@@ -223,6 +231,7 @@ def home():
     td { padding:12px 0; border-bottom:1px solid var(--border); }
     .item { display:flex; justify-content:space-between; padding:12px 0; border-bottom:1px solid var(--border); font-size:14px; }
     .pill { background:#4b5563; color:#fff; padding:4px 10px; border-radius:20px; font-size:11px; font-weight:900; letter-spacing:0.5px;}
+    .pill-pending { background:var(--orange); color:#000; padding:3px 8px; border-radius:6px; font-size:10px; font-weight:bold; margin-left:8px; }
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
 </style>
@@ -253,11 +262,11 @@ def home():
     </div>
 
     <div class="card">
-        <div class="muted" style="margin-bottom:15px;">Live Holdings & Stop Losses</div>
+        <div class="muted" style="margin-bottom:15px;">Live Holdings & Active Orders</div>
         <div class="card-body">
             <table>
                 <thead>
-                    <tr><th>Asset</th><th>Qty</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop Loss</th></tr>
+                    <tr><th>Asset</th><th>Qty</th><th>Current</th><th>P/L</th><th>Status</th></tr>
                 </thead>
                 <tbody id="pos-table"></tbody>
             </table>
@@ -276,58 +285,63 @@ def home():
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     const pct = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2 });
     
-    // Connection Debuggers
     const statusBtn = document.getElementById("status");
     socket.on('connect', () => { statusBtn.innerText = "WEB LINKED"; statusBtn.style.background = "#f59e0b"; });
-    socket.on('disconnect', () => { statusBtn.innerText = "DISCONNECTED"; statusBtn.style.background = "#ef4444"; document.getElementById("mkt").innerText = "LOST CONNECTION"; });
+    socket.on('disconnect', () => { statusBtn.innerText = "DISCONNECTED"; statusBtn.style.background = "#ef4444"; });
 
     socket.on("update", (d) => {
         statusBtn.innerText = "LIVE SYNC";
         statusBtn.style.background = "#22c55e";
 
-        // MATH FOR THE EQUITY PERCENTAGE CHANGE
         const currentEq = parseFloat(d.account.equity || 0);
         const lastEq = parseFloat(d.account.last_equity || currentEq);
-        let pctChange = 0;
-        
-        if (lastEq > 0) {
-            pctChange = ((currentEq - lastEq) / lastEq) * 100;
-        }
+        let pctChange = lastEq > 0 ? ((currentEq - lastEq) / lastEq) * 100 : 0;
 
         document.getElementById("equity").innerText = f.format(currentEq);
         document.getElementById("cash").innerText = f.format(d.account.cash || 0);
         document.getElementById("mkt").innerText = d.market_status;
 
-        // Apply colors and +/- to the new UI element
         const eqPctEl = document.getElementById("equity-pct");
-        if (pctChange === 0) {
-            eqPctEl.innerText = "0.00%";
-            eqPctEl.style.color = "#9ca3af";
-        } else {
-            const isPos = pctChange > 0;
-            eqPctEl.innerText = (isPos ? "+" : "") + pctChange.toFixed(2) + "%";
-            eqPctEl.style.color = isPos ? "var(--green)" : "var(--red)";
+        eqPctEl.innerText = (pctChange > 0 ? "+" : "") + pctChange.toFixed(2) + "%";
+        eqPctEl.style.color = pctChange === 0 ? "#9ca3af" : (pctChange > 0 ? "var(--green)" : "var(--red)");
+
+        let tableHTML = "";
+
+        // 1. Render PENDING Orders first
+        if (d.orders && d.orders.length > 0) {
+            d.orders.forEach(o => {
+                tableHTML += `
+                <tr style="background: rgba(245, 158, 11, 0.1);">
+                    <td><b style="color:#fff;">${o.symbol}</b> <span class="pill-pending">PENDING</span></td>
+                    <td>${o.qty || '-'}</td>
+                    <td style="color:#9ca3af;">${o.order_type.toUpperCase()}</td>
+                    <td style="color:#9ca3af;">--</td>
+                    <td style="color:#f59e0b; font-size:11px;">Waiting Fill</td>
+                </tr>`;
+            });
         }
 
-        if (d.positions.length === 0) {
-            document.getElementById("pos-table").innerHTML = "<tr><td colspan='6' style='text-align:center; color:#6b7280; padding-top:20px;'>No active positions.</td></tr>";
-        } else {
-            document.getElementById("pos-table").innerHTML = d.positions.map(p => {
+        // 2. Render ACTIVE Positions
+        if (d.positions && d.positions.length > 0) {
+            d.positions.forEach(p => {
                 const isProfit = p.unrealized_intraday_pl >= 0;
                 const plColor = isProfit ? '#22c55e' : '#ef4444';
-                const entry = parseFloat(p.avg_entry_price);
-                const stopLoss = entry * 0.98;
-                return `
+                tableHTML += `
                 <tr>
                     <td><b style="color:#fff;">${p.symbol}</b></td>
                     <td>${p.qty}</td>
-                    <td>${f.format(entry)}</td>
                     <td>${f.format(p.current_price)}</td>
                     <td style="color:${plColor}; font-weight:bold;">${f.format(p.unrealized_intraday_pl)} <br><span style="font-size:11px;">(${pct.format(p.unrealized_intraday_plpc)})</span></td>
-                    <td style="color:#ef4444;">${f.format(stopLoss)}</td>
+                    <td style="color:#22c55e; font-size:11px;">Active</td>
                 </tr>`;
-            }).join("");
+            });
         }
+
+        if (tableHTML === "") {
+            tableHTML = "<tr><td colspan='5' style='text-align:center; color:#6b7280; padding-top:20px;'>No active or pending positions.</td></tr>";
+        }
+        
+        document.getElementById("pos-table").innerHTML = tableHTML;
 
         document.getElementById("ranked").innerHTML = d.ranked.map(r => `
             <div class="item">
@@ -338,7 +352,8 @@ def home():
         document.getElementById("logs").innerHTML = d.activity.map(a => `
             <div style="margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid #1f2937;">
                 ${a.includes('ERROR') || a.includes('REJECTED') || a.includes('CRASH') ? `<span style="color:#ef4444">${a}</span>` : 
-                  a.includes('BOUGHT') ? `<span style="color:#22c55e">${a}</span>` : a}
+                  a.includes('BOUGHT') ? `<span style="color:#22c55e">${a}</span>` : 
+                  a.includes('🔔') || a.includes('DAY TRADE') ? `<span style="color:#f59e0b">${a}</span>` : a}
             </div>
         `).join("");
     });
