@@ -1,9 +1,9 @@
 import os
 import time
 import threading
+import requests
 import numpy as np
 import pandas as pd
-import requests
 
 from flask import Flask
 from flask_socketio import SocketIO
@@ -33,22 +33,14 @@ app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # =========================================================
-# BOT STATE
+# STATE
 # =========================================================
 
 bot = {
     "running": True,
     "watchlist": ["AAPL","TSLA","NVDA","AMD","SPY","QQQ","META","AMZN"],
-    "cycle": 10
 }
 
-# adaptive strategy weights (THIS IS THE "LEARNING")
-strategy_scores = {
-    "momentum": 1.0,
-    "mean_revert": 1.0
-}
-
-trade_memory = []
 last_actions = []
 
 # =========================================================
@@ -63,8 +55,7 @@ def positions():
     r = requests.get(BASE_URL + "/v2/positions", headers=HEADERS)
     return r.json() if r.status_code == 200 else []
 
-def order(symbol, side, qty=1):
-
+def order(symbol, side="buy", qty=1):
     try:
         requests.post(
             BASE_URL + "/v2/orders",
@@ -86,12 +77,11 @@ def order(symbol, side, qty=1):
 # MARKET DATA
 # =========================================================
 
-def bars(symbol):
-
+def get_bars(symbol):
     r = requests.get(
         f"{DATA_URL}/stocks/{symbol}/bars",
         headers=HEADERS,
-        params={"timeframe": "1Min", "limit": 60}
+        params={"timeframe": "1Min", "limit": 50}
     )
 
     if r.status_code != 200:
@@ -101,54 +91,28 @@ def bars(symbol):
     return pd.DataFrame(data) if data else None
 
 # =========================================================
-# FEATURES
+# SIMPLE SIGNAL ENGINE
 # =========================================================
 
-def features(df):
+def score_symbol(symbol):
 
-    return {
-        "price": df["c"].iloc[-1],
-        "trend": df["c"].iloc[-1] - df["c"].iloc[-10],
-        "volatility": df["h"].max() - df["l"].min(),
-        "volume": df["v"].iloc[-1]
-    }
-
-# =========================================================
-# AGGRESSIVE SIGNAL ENGINE
-# =========================================================
-
-def score(symbol):
-
-    df = bars(symbol)
-    if df is None or len(df) < 30:
+    df = get_bars(symbol)
+    if df is None or len(df) < 20:
         return None
 
-    f = features(df)
+    price = df["c"].iloc[-1]
+    trend = df["c"].iloc[-1] - df["c"].iloc[-10]
 
-    momentum_score = f["trend"] * strategy_scores["momentum"]
-    mean_revert_score = -abs(f["trend"]) * strategy_scores["mean_revert"]
-
-    total = momentum_score + mean_revert_score
+    score = trend
 
     return {
         "symbol": symbol,
-        "score": total,
-        "price": f["price"]
+        "score": float(score),
+        "price": float(price)
     }
 
 # =========================================================
-# LEARNING SYSTEM
-# =========================================================
-
-def learn(trade_result, strategy_used):
-
-    if trade_result == "win":
-        strategy_scores[strategy_used] *= 1.05
-    else:
-        strategy_scores[strategy_used] *= 0.95
-
-# =========================================================
-# ENGINE
+# TRADING ENGINE
 # =========================================================
 
 def engine():
@@ -162,35 +126,30 @@ def engine():
         ranked = []
 
         for s in bot["watchlist"]:
-            r = score(s)
+            r = score_symbol(s)
             if r:
                 ranked.append(r)
 
         ranked.sort(key=lambda x: x["score"], reverse=True)
 
-        account_data = account()
+        acc = account()
         pos = positions()
 
-        # aggressive trading logic
-        for r in ranked[:3]:
+        # simple execution logic
+        for r in ranked[:2]:
 
             if r["score"] > 0.5:
                 order(r["symbol"], "buy", 1)
 
-        # simulate learning from past trades (simplified)
-        if len(trade_memory) > 5:
-            last = trade_memory[-1]
-            learn(last["result"], "momentum")
-
+        # stream updates
         socketio.emit("update", {
-            "account": account_data,
+            "account": acc,
             "positions": pos,
             "ranked": ranked,
-            "strategies": strategy_scores,
-            "activity": last_actions[-10:]
+            "activity": last_actions[-12:]
         })
 
-        time.sleep(bot["cycle"])
+        time.sleep(3)
 
 # =========================================================
 # UI
@@ -203,54 +162,106 @@ def home():
 <!DOCTYPE html>
 <html>
 <head>
-<title>Aggressive Swing AI</title>
+<title>AI Trading Terminal</title>
 
 <style>
 
 body {
     margin:0;
-    background:#0b0f1a;
-    color:white;
+    background:#0b1220;
+    color:#e5e7eb;
     font-family:Arial;
 }
 
+/* HEADER */
+.header {
+    display:flex;
+    justify-content:space-between;
+    padding:15px 20px;
+    background:#111827;
+    border-bottom:1px solid #1f2937;
+}
+
+/* GRID */
 .grid {
     display:grid;
-    grid-template-columns:1fr 1fr 1fr;
+    grid-template-columns:1.2fr 1fr 1fr;
     gap:15px;
     padding:15px;
 }
 
-.box {
+/* CARDS */
+.card {
     background:rgba(255,255,255,0.05);
+    border:1px solid rgba(255,255,255,0.08);
+    border-radius:14px;
     padding:15px;
-    border-radius:12px;
 }
 
-</style>
+/* TITLES */
+h2,h3 {
+    margin:0 0 10px 0;
+}
 
+/* TEXT */
+.muted {
+    color:#9ca3af;
+    font-size:13px;
+}
+
+/* ITEMS */
+.item {
+    padding:6px 0;
+    border-bottom:1px solid #1f2937;
+    font-size:14px;
+}
+
+/* BIG NUMBER */
+.big {
+    font-size:26px;
+    font-weight:bold;
+}
+
+.green { color:#22c55e; }
+.red { color:#ef4444; }
+
+</style>
 </head>
 
 <body>
 
-<h2 style="padding:15px;">Aggressive AI Swing Trader</h2>
+<div class="header">
+    <div>
+        <b>AI Swing Trading Terminal</b>
+        <div class="muted">Live Alpaca Paper Trading Bot</div>
+    </div>
+</div>
 
 <div class="grid">
 
-<div class="box">
-<h3>Account</h3>
-<div id="account"></div>
-</div>
+    <!-- ACCOUNT -->
+    <div class="card">
+        <h3>Account</h3>
+        <div class="big" id="equity">Loading...</div>
+        <div class="muted">Equity</div>
 
-<div class="box">
-<h3>Top Signals</h3>
-<div id="ranked"></div>
-</div>
+        <br>
 
-<div class="box">
-<h3>Activity</h3>
-<div id="activity"></div>
-</div>
+        <div id="cash"></div>
+        <div class="muted">Cash</div>
+    </div>
+
+    <!-- SIGNALS -->
+    <div class="card">
+        <h3>Top Opportunities</h3>
+        <div id="ranked"></div>
+    </div>
+
+    <!-- ACTIVITY -->
+    <div class="card">
+        <h3>Activity</h3>
+        <div id="activity"></div>
+    </div>
 
 </div>
 
@@ -262,16 +273,25 @@ const socket = io();
 
 socket.on("update", (d) => {
 
-document.getElementById("account").innerHTML =
-"Equity: $" + (d.account.equity || "loading");
+    document.getElementById("equity").innerHTML =
+        "$" + (d.account.equity || "0");
 
-document.getElementById("ranked").innerHTML =
-d.ranked.map(r =>
-`<div><b>${r.symbol}</b> score: ${r.score.toFixed(2)} $${r.price}</div>`
-).join("");
+    document.getElementById("cash").innerHTML =
+        "$" + (d.account.cash || "0");
 
-document.getElementById("activity").innerHTML =
-d.activity.map(a => `<div>${a}</div>`).join("");
+    document.getElementById("ranked").innerHTML =
+        d.ranked.map(r =>
+            `<div class="item">
+                <b>${r.symbol}</b>
+                <span class="${r.score > 0 ? 'green' : 'red'}">
+                    ${r.score.toFixed(2)}
+                </span>
+                <div class="muted">$${r.price}</div>
+            </div>`
+        ).join("");
+
+    document.getElementById("activity").innerHTML =
+        d.activity.map(a => `<div class="item">${a}</div>`).join("");
 
 });
 
