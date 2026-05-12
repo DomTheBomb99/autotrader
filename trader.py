@@ -1,5 +1,5 @@
 import eventlet
-eventlet.monkey_patch() # THIS MUST BE AT THE VERY TOP FOR RAILWAY TO WORK
+eventlet.monkey_patch()
 
 import os
 import time
@@ -33,11 +33,15 @@ bot = {
     "running": True,
     "watchlist": ["AAPL", "TSLA", "NVDA", "AMD", "SPY", "QQQ", "GME"],
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"],
-    "trade_amount_usd": 20.00, # Buys $20 worth of the asset (Fractional Shares)
-    "last_eod_date": ""
+    "trade_amount_usd": 20.00,
+    "last_eod_date": "",
+    
+    # --- ASYMMETRIC RISK/REWARD PROFILE ---
+    "risk_pct": 2.0,    # Risk 2% on the downside
+    "reward_pct": 6.0   # Target 6% on the upside (1:3 Ratio)
 }
 
-activity_log = ["System Initialized... Booting Cloud Engine"]
+activity_log = ["System Initialized... Loading Risk/Reward Protocols"]
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -70,37 +74,36 @@ def get_open_orders():
 
 def place_order(symbol, current_price):
     try:
-        # Calculate Fractional Quantity (e.g., $20.00 / $150.00 = 0.1333 shares)
         raw_qty = bot["trade_amount_usd"] / current_price
-        qty = round(raw_qty, 5) # Alpaca accepts up to 9 decimals, 5 is safe
+        qty = round(raw_qty, 5)
 
-        buy_payload = {
+        # 1:3 Math Calculation
+        take_profit_price = round(current_price * (1 + (bot["reward_pct"] / 100)), 2)
+        stop_loss_price = round(current_price * (1 - (bot["risk_pct"] / 100)), 2)
+
+        # Submit as a Bracket Order
+        payload = {
             "symbol": symbol,
             "qty": qty,
             "side": "buy",
             "type": "market",
-            "time_in_force": "gtc"
-        }
-        r_buy = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=buy_payload)
-        
-        if r_buy.status_code == 200:
-            log_event(f"BOUGHT {qty} {symbol} (~${bot['trade_amount_usd']})")
-            
-            # Attach 2% Trailing Stop
-            trail_payload = {
-                "symbol": symbol,
-                "qty": qty,
-                "side": "sell",
-                "type": "trailing_stop",
-                "trail_percent": 2.0,
-                "time_in_force": "gtc"
+            "time_in_force": "gtc",
+            "order_class": "bracket",
+            "take_profit": {
+                "limit_price": take_profit_price
+            },
+            "stop_loss": {
+                "stop_price": stop_loss_price
+                # Notice we do NOT use limit_price here, creating a true Market Stop
             }
-            time.sleep(1) # Let order register
-            r_trail = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=trail_payload)
-            if r_trail.status_code == 200:
-                log_event(f"ATTACHED 2% Trailing Stop to {symbol}")
+        }
+
+        r = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
+        
+        if r.status_code == 200:
+            log_event(f"BOUGHT {symbol} | Target: ${take_profit_price} | Stop: ${stop_loss_price}")
         else:
-            log_event(f"REJECTED {symbol}: {r_buy.json().get('message', 'Unknown Error')}")
+            log_event(f"REJECTED {symbol}: {r.json().get('message', 'Unknown Error')}")
             
     except Exception as e:
         log_event(f"ORDER CRASH: {str(e)}")
@@ -112,10 +115,10 @@ def get_bars(symbol):
     is_crypto = "/" in symbol
     if is_crypto:
         url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars"
-        params = {"symbols": symbol, "timeframe": "1Min", "limit": 20}
+        params = {"symbols": symbol, "timeframe": "1Min", "limit": 30}
     else:
         url = f"{DATA_URL}/stocks/{symbol}/bars"
-        params = {"timeframe": "1Min", "limit": 20, "feed": "iex"}
+        params = {"timeframe": "1Min", "limit": 30, "feed": "iex"}
     
     try:
         r = requests.get(url, headers=HEADERS, params=params)
@@ -128,10 +131,14 @@ def get_bars(symbol):
 
 def score_symbol(symbol):
     df = get_bars(symbol)
-    if df is None or len(df) < 10: return None
+    if df is None or len(df) < 20: return None
+    
     current_price = float(df["c"].iloc[-1])
-    past_price = float(df["c"].iloc[-10])
+    
+    # Upgraded Signal: Look for a stronger breakout to justify a 6% target
+    past_price = float(df["c"].iloc[-15])
     percent_change = ((current_price - past_price) / past_price) * 100
+    
     return {"symbol": symbol, "score": percent_change, "price": current_price}
 
 # =========================================================
@@ -141,7 +148,6 @@ def engine():
     log_event("Alpaca Connection Established. Scanning markets...")
     while True:
         try:
-            # 1. Market Clock & EOD Logic
             clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS)
             clock_data = clock_req.json() if clock_req.status_code == 200 else {}
             is_open = clock_data.get("is_open", False)
@@ -153,19 +159,17 @@ def engine():
                 mins_to_close = (close_t - now_t).total_seconds() / 60.0
                 curr_date = str(now_t.date())
                 
-                # If less than 15 mins to market close, evaluate holding risk
                 if 0 < mins_to_close < 15 and bot["last_eod_date"] != curr_date:
-                    log_event("🔔 15 MIN TO CLOSE: Evaluating Swing vs Day Trades...")
+                    log_event("🔔 EOD PROTOCOL: Evaluating Overnight Risk...")
                     pos_to_eval = get_positions()
                     for p in pos_to_eval:
                         if "USD" in p['symbol']: continue 
-                        
                         pl_pct = float(p.get("unrealized_intraday_plpc", 0))
                         if pl_pct < 0:
-                            log_event(f"DAY TRADE CLOSE: Selling {p['symbol']} to avoid overnight gap down.")
+                            log_event(f"DAY TRADE CLOSE: Selling {p['symbol']} to cut losses.")
                             requests.delete(f"{BASE_URL}/v2/positions/{p['symbol']}", headers=HEADERS)
                         else:
-                            log_event(f"SWING TRADE: Holding {p['symbol']} overnight for continued gains.")
+                            log_event(f"SWING TRADE: Holding {p['symbol']} overnight.")
                     bot["last_eod_date"] = curr_date
 
             # 2. Score Assets
@@ -177,20 +181,18 @@ def engine():
 
             ranked.sort(key=lambda x: x["score"], reverse=True)
 
-            # 3. Fetch Portfolio
             acc = get_account()
             pos = get_positions()
             orders = get_open_orders()
 
-            # 4. Execute Trades (Buy if trending > 0.1%)
+            # 3. Execute Trades (Trigger threshold increased slightly for stronger conviction)
             for r in ranked[:2]:
-                if r["score"] > 0.1:
+                if r["score"] > 0.15:
                     already_hold = any(p.get('symbol') == r['symbol'] for p in pos)
                     already_pending = any(o.get('symbol') == r['symbol'] for o in orders)
                     if not already_hold and not already_pending:
                         place_order(r["symbol"], r["price"])
 
-            # 5. Broadcast to UI
             socketio.emit("update", {
                 "account": acc,
                 "positions": pos,
@@ -217,7 +219,7 @@ def home():
 <meta charset="UTF-8">
 <title>AI Trading Terminal</title>
 <style>
-    :root { --bg: #0b1220; --card: #111827; --border: #1f2937; --text: #e5e7eb; --green: #22c55e; --red: #ef4444; --orange: #f59e0b; }
+    :root { --bg: #0b1220; --card: #111827; --border: #1f2937; --text: #e5e7eb; --green: #22c55e; --red: #ef4444; --orange: #f59e0b; --blue: #3b82f6; }
     body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system, sans-serif; }
     .header { display:flex; justify-content:space-between; align-items:center; padding:15px 25px; background:var(--card); border-bottom:1px solid var(--border); }
     .grid { display:grid; grid-template-columns:300px 1fr 350px; gap:20px; padding:20px; height: calc(100vh - 80px); }
@@ -256,16 +258,16 @@ def home():
         <div class="muted">Buying Power</div>
         <div id="cash" style="font-size:20px; font-weight:bold; margin-bottom:25px; color:#9ca3af;">$0.00</div>
         <hr style="border:0; border-top:1px solid var(--border); margin-bottom:20px;">
-        <div class="muted" style="margin-bottom:10px;">Live AI Momentum (% Change)</div>
+        <div class="muted" style="margin-bottom:10px;">Live Breakout Signals</div>
         <div class="card-body" id="ranked"></div>
     </div>
 
     <div class="card">
-        <div class="muted" style="margin-bottom:15px;">Live Holdings & Active Orders</div>
+        <div class="muted" style="margin-bottom:15px;">Live 1:3 Risk/Reward Positions</div>
         <div class="card-body">
             <table>
                 <thead>
-                    <tr><th>Asset</th><th>Qty</th><th>Current</th><th>P/L</th><th>Status</th></tr>
+                    <tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop (-2%)</th><th>Target (+6%)</th></tr>
                 </thead>
                 <tbody id="pos-table"></tbody>
             </table>
@@ -306,44 +308,30 @@ def home():
 
         let tableHTML = "";
 
-        // 1. Render PENDING Orders first
-        if (d.orders && d.orders.length > 0) {
-            d.orders.forEach(o => {
-                const sideText = o.side ? o.side.toUpperCase() : "PENDING";
-                const badgeColor = o.side === 'sell' ? '#ef4444' : '#22c55e'; 
-                
-                tableHTML += `
-                <tr style="background: rgba(245, 158, 11, 0.1);">
-                    <td>
-                        <b style="color:#fff;">${o.symbol}</b> 
-                        <span class="pill-pending" style="background:${badgeColor}; color:#fff;">${sideText}</span>
-                    </td>
-                    <td>${o.qty || '-'}</td>
-                    <td style="color:#9ca3af; font-size:11px;">${o.order_type.replace('_', ' ').toUpperCase()}</td>
-                    <td style="color:#9ca3af;">--</td>
-                    <td style="color:#f59e0b; font-size:11px;">Waiting Fill</td>
-                </tr>`;
-            });
-        }
-
-        // 2. Render ACTIVE Positions
         if (d.positions && d.positions.length > 0) {
             d.positions.forEach(p => {
                 const isProfit = p.unrealized_intraday_pl >= 0;
                 const plColor = isProfit ? '#22c55e' : '#ef4444';
+                const entry = parseFloat(p.avg_entry_price);
+                
+                // Reverse-engineer the target and stop based on the entry price
+                const stopLoss = entry * 0.98;
+                const target = entry * 1.06;
+
                 tableHTML += `
                 <tr>
-                    <td><b style="color:#fff;">${p.symbol}</b></td>
-                    <td>${p.qty}</td>
+                    <td><b style="color:#fff;">${p.symbol}</b><br><span style="font-size:10px; color:#6b7280;">Qty: ${p.qty}</span></td>
+                    <td>${f.format(entry)}</td>
                     <td>${f.format(p.current_price)}</td>
                     <td style="color:${plColor}; font-weight:bold;">${f.format(p.unrealized_intraday_pl)} <br><span style="font-size:11px;">(${pct.format(p.unrealized_intraday_plpc)})</span></td>
-                    <td style="color:#22c55e; font-size:11px;">Active</td>
+                    <td style="color:var(--red); font-weight:600;">${f.format(stopLoss)}</td>
+                    <td style="color:var(--blue); font-weight:600;">${f.format(target)}</td>
                 </tr>`;
             });
         }
 
         if (tableHTML === "") {
-            tableHTML = "<tr><td colspan='5' style='text-align:center; color:#6b7280; padding-top:20px;'>No active or pending positions.</td></tr>";
+            tableHTML = "<tr><td colspan='6' style='text-align:center; color:#6b7280; padding-top:20px;'>No active positions. Scanning for breakouts...</td></tr>";
         }
         
         document.getElementById("pos-table").innerHTML = tableHTML;
