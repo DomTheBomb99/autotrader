@@ -1,7 +1,4 @@
-flask
-Flask-SocketIO
-eventlet
 requests
 pandas
-numpy
-scikit-learn
+Flask
+Flask-SocketIO
