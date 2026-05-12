@@ -1,5 +1,5 @@
 import eventlet
-eventlet.monkey_patch()
+eventlet.monkey_patch() # THIS MUST BE AT THE VERY TOP FOR RAILWAY TO WORK
 
 import os
 import time
@@ -158,7 +158,6 @@ def engine():
                     log_event("🔔 15 MIN TO CLOSE: Evaluating Swing vs Day Trades...")
                     pos_to_eval = get_positions()
                     for p in pos_to_eval:
-                        # Skip crypto for EOD logic since it trades 24/7
                         if "USD" in p['symbol']: continue 
                         
                         pl_pct = float(p.get("unrealized_intraday_plpc", 0))
@@ -231,7 +230,7 @@ def home():
     td { padding:12px 0; border-bottom:1px solid var(--border); }
     .item { display:flex; justify-content:space-between; padding:12px 0; border-bottom:1px solid var(--border); font-size:14px; }
     .pill { background:#4b5563; color:#fff; padding:4px 10px; border-radius:20px; font-size:11px; font-weight:900; letter-spacing:0.5px;}
-    .pill-pending { background:var(--orange); color:#000; padding:3px 8px; border-radius:6px; font-size:10px; font-weight:bold; margin-left:8px; }
+    .pill-pending { padding:3px 8px; border-radius:6px; font-size:10px; font-weight:bold; margin-left:8px; }
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
 </style>
@@ -310,11 +309,17 @@ def home():
         // 1. Render PENDING Orders first
         if (d.orders && d.orders.length > 0) {
             d.orders.forEach(o => {
+                const sideText = o.side ? o.side.toUpperCase() : "PENDING";
+                const badgeColor = o.side === 'sell' ? '#ef4444' : '#22c55e'; 
+                
                 tableHTML += `
                 <tr style="background: rgba(245, 158, 11, 0.1);">
-                    <td><b style="color:#fff;">${o.symbol}</b> <span class="pill-pending">PENDING</span></td>
+                    <td>
+                        <b style="color:#fff;">${o.symbol}</b> 
+                        <span class="pill-pending" style="background:${badgeColor}; color:#fff;">${sideText}</span>
+                    </td>
                     <td>${o.qty || '-'}</td>
-                    <td style="color:#9ca3af;">${o.order_type.toUpperCase()}</td>
+                    <td style="color:#9ca3af; font-size:11px;">${o.order_type.replace('_', ' ').toUpperCase()}</td>
                     <td style="color:#9ca3af;">--</td>
                     <td style="color:#f59e0b; font-size:11px;">Waiting Fill</td>
                 </tr>`;
