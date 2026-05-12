@@ -5,13 +5,12 @@ import numpy as np
 import pandas as pd
 import requests
 
-from flask import Flask, request, redirect
-
+from flask import Flask, redirect
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 # =========================================================
-# RAILWAY SAFE CONFIG
+# RAILWAY CONFIG
 # =========================================================
 
 API_KEY = os.environ.get("ALPACA_API_KEY", "YOUR_KEY")
@@ -28,13 +27,13 @@ HEADERS = {
 PORT = int(os.environ.get("PORT", 7777))
 
 # =========================================================
-# FLASK (MUST BE FIRST BEFORE ROUTES)
+# FLASK (MUST BE FIRST)
 # =========================================================
 
 app = Flask(__name__)
 
 # =========================================================
-# ML MODEL
+# ML SYSTEM
 # =========================================================
 
 model = LogisticRegression()
@@ -45,7 +44,7 @@ y_data = []
 model_ready = False
 
 # =========================================================
-# BOT STATE
+# STATE
 # =========================================================
 
 bot = {
@@ -54,8 +53,11 @@ bot = {
     "watchlist": ["AAPL","TSLA","NVDA","AMD","SPY","QQQ","META","AMZN"]
 }
 
+last_actions = []
+next_cycle = 0
+
 # =========================================================
-# API HELPERS
+# API
 # =========================================================
 
 def get(url):
@@ -73,7 +75,7 @@ def positions():
     return r.json() if r.status_code == 200 else []
 
 # =========================================================
-# MARKET DATA
+# DATA
 # =========================================================
 
 def bars(symbol, tf="1Min", limit=80):
@@ -89,10 +91,10 @@ def bars(symbol, tf="1Min", limit=80):
     return pd.DataFrame(data) if data else None
 
 # =========================================================
-# FEATURE ENGINE
+# FEATURES
 # =========================================================
 
-def make_features(df):
+def features(df):
 
     return [
         df["c"].iloc[-1],
@@ -104,10 +106,10 @@ def make_features(df):
     ]
 
 # =========================================================
-# AUTO TRAIN DATA GENERATION
+# AUTO DATA GENERATION (ML LEARNING)
 # =========================================================
 
-def generate_data():
+def generate():
 
     for s in bot["watchlist"]:
 
@@ -118,32 +120,32 @@ def generate_data():
 
         for i in range(25, len(df)-1):
 
-            window = df.iloc[:i]
-            future = df.iloc[i+1]
+            w = df.iloc[:i]
+            f = df.iloc[i+1]
 
             x = [
-                window["c"].iloc[-1],
-                window["c"].rolling(5).mean().iloc[-1],
-                window["c"].rolling(20).mean().iloc[-1],
-                window["v"].iloc[-1],
-                window["v"].rolling(10).mean().iloc[-1],
-                window["h"].max() - window["l"].min()
+                w["c"].iloc[-1],
+                w["c"].rolling(5).mean().iloc[-1],
+                w["c"].rolling(20).mean().iloc[-1],
+                w["v"].iloc[-1],
+                w["v"].rolling(10).mean().iloc[-1],
+                w["h"].max() - w["l"].min()
             ]
 
-            y = 1 if future["c"] > window["c"].iloc[-1] else 0
+            y = 1 if f["c"] > w["c"].iloc[-1] else 0
 
             X_data.append(x)
             y_data.append(y)
 
 # =========================================================
-# TRAIN ML MODEL
+# TRAIN MODEL
 # =========================================================
 
-def train_model():
+def train():
 
     global model_ready
 
-    if len(X_data) < 40:
+    if len(X_data) < 50:
         return
 
     X = np.array(X_data)
@@ -157,7 +159,7 @@ def train_model():
     model_ready = True
 
 # =========================================================
-# ML PREDICTION
+# PREDICT
 # =========================================================
 
 def predict(x):
@@ -170,10 +172,10 @@ def predict(x):
     return model.predict_proba(x)[0][1]
 
 # =========================================================
-# RANKING SYSTEM (TOP PICKS ONLY)
+# RANKING SYSTEM
 # =========================================================
 
-def rank_symbols():
+def rank():
 
     ranked = []
 
@@ -184,7 +186,7 @@ def rank_symbols():
         if df is None or len(df) < 30:
             continue
 
-        x = make_features(df)
+        x = features(df)
 
         conf = predict(x)
 
@@ -195,7 +197,7 @@ def rank_symbols():
     return ranked[:3]
 
 # =========================================================
-# EXECUTION
+# BUY
 # =========================================================
 
 def buy(symbol):
@@ -209,36 +211,47 @@ def buy(symbol):
     })
 
     bot["last"] = f"BUY {symbol}"
+    last_actions.append(f"BUY {symbol}")
 
 # =========================================================
-# MAIN LOOP
+# LOOP
 # =========================================================
 
 def loop():
+
+    global next_cycle
 
     while True:
 
         try:
 
             if not bot["running"]:
-                time.sleep(5)
+                time.sleep(2)
                 continue
 
-            generate_data()
-            train_model()
+            next_cycle = 20
 
-            top = rank_symbols()
+            last_actions.append("Scanning market...")
 
-            for sym, conf in top:
+            generate()
+            train()
 
-                if conf > 0.65:
-                    buy(sym)
+            top = rank()
 
-            time.sleep(20)
+            for s, c in top:
+
+                last_actions.append(f"{s} confidence {c:.2f}")
+
+                if c > 0.65:
+                    buy(s)
+
+            for i in range(20):
+                next_cycle = 20 - i
+                time.sleep(1)
 
         except Exception as e:
-            bot["last"] = str(e)
-            time.sleep(5)
+            last_actions.append(str(e))
+            time.sleep(3)
 
 # =========================================================
 # CONTROLS
@@ -251,85 +264,106 @@ def toggle():
 
     return redirect("/")
 
-@app.route("/buy/<symbol>")
-def manual(symbol):
-
-    buy(symbol)
-
-    return redirect("/")
-
 # =========================================================
-# DASHBOARD (RAILWAY SAFE + FULL UI)
+# DASHBOARD (MODERN TERMINAL UI)
 # =========================================================
 
 @app.route("/")
-def dashboard():
+def dash():
 
     acc = account()
     pos = positions()
 
     equity = acc.get("equity", "0")
     cash = acc.get("cash", "0")
-    buying_power = acc.get("buying_power", "0")
 
     total_pl = sum(float(p["unrealized_pl"]) for p in pos) if pos else 0
 
     portfolio = ""
-
     for p in pos:
-
         portfolio += f"""
-        <tr>
-            <td>{p['symbol']}</td>
-            <td>{p['qty']}</td>
-            <td>${p['market_value']}</td>
-            <td>${p['avg_entry_price']}</td>
-            <td style="color:{'lime' if float(p['unrealized_pl'])>=0 else 'red'}">
+        <div class="row">
+            <span>{p['symbol']}</span>
+            <span>{p['qty']}</span>
+            <span>${p['market_value']}</span>
+            <span style="color:{'lime' if float(p['unrealized_pl'])>=0 else 'red'}">
                 ${p['unrealized_pl']}
-            </td>
-        </tr>
+            </span>
+        </div>
+        """
+
+    activity = ""
+    for a in list(last_actions)[-10:]:
+        activity += f"<div class='feed'>{a}</div>"
+
+    ranked = ""
+    for s, c in rank():
+        ranked += f"""
+        <div class="card">
+            <b>{s}</b><br>
+            Confidence: {round(c*100,1)}%
+        </div>
         """
 
     return f"""
     <html>
     <head>
-    <meta http-equiv="refresh" content="10">
+    <meta http-equiv="refresh" content="5">
+
     <style>
 
     body {{
-        background:#0b0f1a;
+        margin:0;
+        background:#0a0f1f;
         color:white;
         font-family:Arial;
+    }}
+
+    .top {{
+        display:flex;
+        justify-content:space-between;
+        padding:15px;
+        background:#111827;
     }}
 
     .grid {{
         display:grid;
         grid-template-columns:1fr 1fr 1fr;
-        gap:10px;
-        padding:10px;
+        gap:15px;
+        padding:15px;
     }}
 
-    .box {{
-        background:rgba(255,255,255,0.06);
-        padding:12px;
-        border-radius:10px;
+    .panel {{
+        background:rgba(255,255,255,0.05);
+        border-radius:14px;
+        padding:15px;
     }}
 
-    table {{
-        width:100%;
-    }}
-
-    td,th {{
-        padding:6px;
+    .row {{
+        display:flex;
+        justify-content:space-between;
+        padding:5px 0;
         border-bottom:1px solid #1f2937;
     }}
 
+    .feed {{
+        font-size:12px;
+        opacity:0.8;
+    }}
+
+    .card {{
+        background:rgba(255,255,255,0.06);
+        padding:10px;
+        margin:5px 0;
+        border-radius:10px;
+    }}
+
     button {{
-        padding:8px;
-        background:#2563eb;
-        color:white;
+        padding:8px 12px;
         border:none;
         border-radius:8px;
+        background:#2563eb;
+        color:white;
     }}
 
     </style>
@@ -337,46 +371,35 @@ def dashboard():
 
     <body>
 
+    <div class="top">
+        <div><b>AI Trading Terminal</b></div>
+        <div>Next Update: {next_cycle}s</div>
+        <div><a href="/toggle"><button>{"STOP" if bot['running'] else "START"}</button></a></div>
+    </div>
+
     <div class="grid">
 
-        <div class="box">
+        <div class="panel">
             <h3>Account</h3>
             Equity: ${equity}<br>
             Cash: ${cash}<br>
-            Buying Power: ${buying_power}<br>
+            P/L: <span style="color:{'lime' if total_pl>=0 else 'red'}">${total_pl:.2f}</span>
         </div>
 
-        <div class="box">
-            <h3>Bot</h3>
-            Running: {bot['running']}<br>
-            ML Ready: {model_ready}<br>
-            Samples: {len(X_data)}<br>
-            Last: {bot['last']}<br>
-
-            <a href="/toggle"><button>Start/Stop</button></a>
+        <div class="panel">
+            <h3>Activity</h3>
+            {activity}
         </div>
 
-        <div class="box">
-            <h3>P&L</h3>
-            Total: <span style="color:{'lime' if total_pl>=0 else 'red'}">${total_pl:.2f}</span>
+        <div class="panel">
+            <h3>Opportunities</h3>
+            {ranked}
         </div>
 
-    </div>
-
-    <div class="box" style="margin:10px">
-
-        <h3>Portfolio</h3>
-
-        <table>
-        <tr>
-            <th>Symbol</th>
-            <th>Qty</th>
-            <th>Value</th>
-            <th>Entry</th>
-            <th>P/L</th>
-        </tr>
-        {portfolio}
-        </table>
+        <div class="panel">
+            <h3>Portfolio</h3>
+            {portfolio}
+        </div>
 
     </div>
 
@@ -385,7 +408,7 @@ def dashboard():
     """
 
 # =========================================================
-# STARTUP (IMPORTANT ORDER)
+# START
 # =========================================================
 
 threading.Thread(target=loop, daemon=True).start()
