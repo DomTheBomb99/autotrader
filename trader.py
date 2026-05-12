@@ -6,6 +6,7 @@ import pandas as pd
 import requests
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
+from flask import Flask, request, redirect
 
 # =========================================================
 # CONFIG
@@ -24,23 +25,17 @@ HEADERS = {
 
 PORT = int(os.environ.get("PORT", 7777))
 
-# =========================================================
-# FLASK
-# =========================================================
-
-from flask import Flask
-
 app = Flask(__name__)
 
 # =========================================================
-# ML MODEL
+# ML SYSTEM
 # =========================================================
 
 model = LogisticRegression()
 scaler = StandardScaler()
 
-training_data = []
-labels = []
+X_data = []
+y_data = []
 model_ready = False
 
 # =========================================================
@@ -52,16 +47,6 @@ bot = {
     "last": "booted",
     "watchlist": ["AAPL","TSLA","NVDA","AMD","SPY","QQQ","META","AMZN"]
 }
-
-# =========================================================
-# API
-# =========================================================
-
-def get(url):
-    return requests.get(BASE_URL + url, headers=HEADERS)
-
-def post(url, payload):
-    return requests.post(BASE_URL + url, json=payload, headers=HEADERS)
 
 # =========================================================
 # DATA
@@ -96,18 +81,50 @@ def features(df):
     ]
 
 # =========================================================
-# TRAIN MODEL
+# AUTO DATA GENERATION (FIX FOR 0 SAMPLES ISSUE)
+# =========================================================
+
+def generate_training_data():
+
+    for s in bot["watchlist"]:
+
+        df = bars(s, "1Min", 80)
+
+        if df is None or len(df) < 30:
+            continue
+
+        for i in range(25, len(df)-1):
+
+            window = df.iloc[:i]
+            future = df.iloc[i+1]
+
+            x = [
+                window["c"].iloc[-1],
+                window["c"].rolling(5).mean().iloc[-1],
+                window["c"].rolling(20).mean().iloc[-1],
+                window["v"].iloc[-1],
+                window["v"].rolling(10).mean().iloc[-1],
+                window["h"].max() - window["l"].min()
+            ]
+
+            outcome = 1 if future["c"] > window["c"].iloc[-1] else 0
+
+            X_data.append(x)
+            y_data.append(outcome)
+
+# =========================================================
+# TRAIN
 # =========================================================
 
 def train():
 
     global model_ready
 
-    if len(training_data) < 30:
+    if len(X_data) < 30:
         return
 
-    X = np.array(training_data)
-    y = np.array(labels)
+    X = np.array(X_data)
+    y = np.array(y_data)
 
     scaler.fit(X)
     Xs = scaler.transform(X)
@@ -130,14 +147,14 @@ def predict(x):
     return model.predict_proba(x)[0][1]
 
 # =========================================================
-# EVALUATE SYMBOL
+# EVALUATE
 # =========================================================
 
 def evaluate(symbol):
 
-    df = bars(symbol,"1Min",60)
+    df = bars(symbol, "1Min", 60)
 
-    if df is None or len(df) < 25:
+    if df is None or len(df) < 30:
         return None
 
     x = features(df)
@@ -145,23 +162,23 @@ def evaluate(symbol):
     return symbol, predict(x), x
 
 # =========================================================
-# BUY
+# BUY (SIMPLIFIED PAPER ORDER)
 # =========================================================
 
 def buy(symbol):
 
-    post("/v2/orders", {
+    requests.post(BASE_URL + "/v2/orders", json={
         "symbol": symbol,
         "qty": 1,
         "side": "buy",
         "type": "market",
         "time_in_force": "gtc"
-    })
+    }, headers=HEADERS)
 
     bot["last"] = f"BUY {symbol}"
 
 # =========================================================
-# LOOP
+# MAIN LOOP
 # =========================================================
 
 def loop():
@@ -174,6 +191,9 @@ def loop():
                 time.sleep(5)
                 continue
 
+            generate_training_data()
+            train()
+
             picks = []
 
             for s in bot["watchlist"]:
@@ -185,15 +205,13 @@ def loop():
                     sym, conf, x = r
 
                     if conf > 0.65:
-                        picks.append((sym, conf, x))
+                        picks.append((sym, conf))
 
             picks.sort(key=lambda x: x[1], reverse=True)
 
-            for sym, conf, x in picks[:3]:
+            for sym, conf in picks[:2]:
 
                 buy(sym)
-
-            train()
 
             time.sleep(20)
 
@@ -202,7 +220,25 @@ def loop():
             time.sleep(5)
 
 # =========================================================
-# DASHBOARD (FIXED - NO LOGIN, NOT BLANK)
+# CONTROLS
+# =========================================================
+
+@app.route("/toggle")
+def toggle():
+
+    bot["running"] = not bot["running"]
+
+    return redirect("/")
+
+@app.route("/buy/<symbol>")
+def manual(symbol):
+
+    buy(symbol)
+
+    return redirect("/")
+
+# =========================================================
+# DASHBOARD (FIXED + BUTTONS)
 # =========================================================
 
 @app.route("/")
@@ -212,6 +248,7 @@ def dash():
     <html>
     <head>
     <meta http-equiv="refresh" content="10">
+
     <style>
 
     body {{
@@ -227,6 +264,15 @@ def dash():
         border-radius:12px;
     }}
 
+    button {{
+        padding:10px;
+        margin:5px;
+        background:#2563eb;
+        color:white;
+        border:none;
+        border-radius:8px;
+    }}
+
     </style>
     </head>
 
@@ -236,12 +282,22 @@ def dash():
         <h2>ML Trading Bot</h2>
         <p>Status: {bot['last']}</p>
         <p>ML Ready: {model_ready}</p>
-        <p>Training Samples: {len(training_data)}</p>
+        <p>Training Samples: {len(X_data)}</p>
+
+        <a href="/toggle"><button>Start / Stop Bot</button></a>
     </div>
 
     <div class="box">
         <h3>Watchlist</h3>
         <p>{", ".join(bot['watchlist'])}</p>
+    </div>
+
+    <div class="box">
+        <h3>Manual Trades</h3>
+
+        <a href="/buy/AAPL"><button>Buy AAPL</button></a>
+        <a href="/buy/TSLA"><button>Buy TSLA</button></a>
+        <a href="/buy/NVDA"><button>Buy NVDA</button></a>
     </div>
 
     </body>
