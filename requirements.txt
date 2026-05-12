@@ -1,9 +1,7 @@
 flask
-flask-socketio
+Flask-SocketIO
 eventlet
 requests
 pandas
 numpy
 scikit-learn
-gunicorn
-plyer
