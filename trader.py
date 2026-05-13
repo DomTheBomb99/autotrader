@@ -43,7 +43,7 @@ bot = {
     "reward_pct": 6.0   
 }
 
-activity_log = ["System Initialized... Booting Hybrid Scanner"]
+activity_log = ["System Initialized... Fixing Crypto Rejections"]
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -91,25 +91,43 @@ def get_positions():
 
 def place_order(symbol, current_price):
     try:
+        is_crypto = "/" in symbol
         qty = round(bot["trade_amount_usd"] / current_price, 5)
-        take_profit = round(current_price * (1 + (bot["reward_pct"] / 100)), 2)
-        stop_loss = round(current_price * (1 - (bot["risk_pct"] / 100)), 2)
         
-        # Smart Time-In-Force: Stocks need DAY for fractions, Crypto needs GTC because it never closes
-        tif = "gtc" if "/" in symbol else "day"
-        
-        payload = {
-            "symbol": symbol, "qty": qty, "side": "buy", "type": "market",
-            "time_in_force": tif,
-            "order_class": "bracket",
-            "take_profit": {"limit_price": take_profit},
-            "stop_loss": {"stop_price": stop_loss}
-        }
+        # Calculate Exits
+        tp_price = current_price * (1 + (bot["reward_pct"] / 100))
+        sl_price = current_price * (1 - (bot["risk_pct"] / 100))
+
+        # Fix Error 1: Ensure at least $0.01 spread for crypto take-profit (DOGE Fix)
+        if is_crypto:
+            if (tp_price - current_price) < 0.01:
+                tp_price = current_price + 0.011
+            if (current_price - sl_price) < 0.01:
+                sl_price = current_price - 0.011
+
+        take_profit = round(tp_price, 4 if is_crypto else 2)
+        stop_loss = round(sl_price, 4 if is_crypto else 2)
+
+        # Fix Error 2: Use "simple" for Crypto, "bracket" for Stocks
+        if is_crypto:
+            payload = {
+                "symbol": symbol, "qty": qty, "side": "buy", "type": "market",
+                "time_in_force": "gtc"
+            }
+        else:
+            payload = {
+                "symbol": symbol, "qty": qty, "side": "buy", "type": "market",
+                "time_in_force": "day",
+                "order_class": "bracket",
+                "take_profit": {"limit_price": take_profit},
+                "stop_loss": {"stop_price": stop_loss}
+            }
+            
         r = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
         if r.status_code == 200:
             log_event(f"BOUGHT {symbol} | Target: ${take_profit} | Stop: ${stop_loss}")
         else:
-            log_event(f"ORDER REJECTED {symbol}: {r.json().get('message', 'Unknown Error')}")
+            log_event(f"REJECTED {symbol}: {r.text}")
     except Exception as e:
         log_event(f"ORDER ERROR: {str(e)}")
 
@@ -128,23 +146,12 @@ def get_bars(symbol):
 def score_symbol(symbol):
     try:
         df = get_bars(symbol)
-        
-        # Safety Net: If API returns no data, return a default 0 score so it stays on UI
-        if df is None or len(df) < 2: 
-            return {"symbol": symbol, "score": 0.0, "price": 0.0}
-            
+        if df is None or len(df) < 2: return {"symbol": symbol, "score": 0.0, "price": 0.0}
         current_price = float(df["c"].iloc[-1])
-        # Use oldest available bar (up to 30 mins) instead of strictly 15 to prevent indexing crashes
         past_price = float(df["c"].iloc[0]) 
-        
-        if past_price > 0:
-            percent_change = ((current_price - past_price) / past_price) * 100
-        else:
-            percent_change = 0.0
-            
+        percent_change = ((current_price - past_price) / past_price) * 100 if past_price > 0 else 0.0
         return {"symbol": symbol, "score": percent_change, "price": current_price}
-    except:
-        return {"symbol": symbol, "score": 0.0, "price": 0.0}
+    except: return {"symbol": symbol, "score": 0.0, "price": 0.0}
 
 def engine():
     while True:
@@ -152,13 +159,11 @@ def engine():
             clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS)
             clock_data = clock_req.json() if clock_req.status_code == 200 else {}
             is_open = clock_data.get("is_open", False)
-            curr_date = clock_data.get('timestamp', '')[:10]
             
-            if is_open and bot["last_scan_date"] != curr_date:
+            if is_open and bot["last_scan_date"] != clock_data.get('timestamp', '')[:10]:
                 run_daily_scanner()
-                bot["last_scan_date"] = curr_date
+                bot["last_scan_date"] = clock_data.get('timestamp', '')[:10]
 
-            # ALWAYS combine stocks and crypto into one super-list
             active_list = bot["watchlist"] + bot["crypto_watchlist"]
             if len(bot["watchlist"]) == 0:
                 active_list = ["TSLA", "NVDA", "AMD", "COIN", "MARA"] + bot["crypto_watchlist"]
@@ -172,14 +177,25 @@ def engine():
             acc = get_account()
             pos = get_positions()
 
+            # 1. HANDLE BUYING
             for r in ranked[:2]:
                 if r["score"] > 0.15:
                     if not any(p.get('symbol') == r['symbol'] for p in pos):
                         place_order(r["symbol"], r["price"])
 
+            # 2. HANDLE CRYPTO EXITS (Manual SL/TP since we can't use brackets)
+            for p in pos:
+                if "/" in p['symbol']:
+                    entry = float(p['avg_entry_price'])
+                    curr = float(p['current_price'])
+                    gain = ((curr - entry) / entry) * 100
+                    if gain >= bot["reward_pct"] or gain <= -bot["risk_pct"]:
+                        log_event(f"EXIT {p['symbol']} at {gain:.2f}%")
+                        requests.delete(f"{BASE_URL}/v2/positions/{p['symbol']}", headers=HEADERS)
+
             socketio.emit("update", {
                 "account": acc, "positions": pos,
-                "ranked": ranked[:10], "activity": activity_log[::-1], # Increased to show 10 items
+                "ranked": ranked[:10], "activity": activity_log[::-1],
                 "market_status": "MARKET OPEN" if is_open else "MARKET CLOSED",
                 "is_open": is_open, "next_event": clock_data.get('next_close', '') if is_open else clock_data.get('next_open', '')
             })
@@ -225,10 +241,7 @@ def home():
 </div>
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-    const socket = io({
-        transports: ["websocket", "polling"],
-        upgrade: true
-    });
+    const socket = io({ transports: ["websocket", "polling"], upgrade: true });
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     function updateCountdown(endTime) {
         if (!endTime) return "Calculating...";
@@ -242,21 +255,23 @@ def home():
         document.getElementById("equity").innerText = f.format(d.account.equity); document.getElementById("cash").innerText = f.format(d.account.cash);
         document.getElementById("mkt").innerText = d.market_status;
 
-        const posContainer = document.getElementById("pos-container");
+        const posContainer = document.getElementById("pos-table");
         if (d.positions.length > 0) {
-            posContainer.innerHTML = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody>${d.positions.map(p => {
+            posContainer.innerHTML = d.positions.map(p => {
                 const entry = parseFloat(p.avg_entry_price);
-                return `<tr><td><b>${p.symbol}</b></td><td>${f.format(entry)}</td><td>${f.format(p.current_price)}</td><td style="color:${p.unrealized_intraday_pl >= 0 ? 'var(--green)' : 'var(--red)'}">${f.format(p.unrealized_intraday_pl)}</td><td style="color:var(--red)">${f.format(entry * 0.98)}</td><td style="color:var(--blue)">${f.format(entry * 1.06)}</td></tr>`;
-            }).join("")}</tbody></table>`;
+                const isCrypto = p.symbol.includes("/");
+                // For crypto, the bot manages exits manually, so we show what it's aiming for
+                const sl = isCrypto ? entry * 0.98 : (p.stop_loss || entry * 0.98);
+                const tp = isCrypto ? entry * 1.06 : (p.take_profit || entry * 1.06);
+                return `<tr><td><b>${p.symbol}</b></td><td>${f.format(entry)}</td><td>${f.format(p.current_price)}</td><td style="color:${p.unrealized_intraday_pl >= 0 ? 'var(--green)' : 'var(--red)'}">${f.format(p.unrealized_intraday_pl)}</td><td style="color:var(--red)">${f.format(sl)}</td><td style="color:var(--blue)">${f.format(tp)}</td></tr>`;
+            }).join("");
         } else {
-            posContainer.innerHTML = `<div class="countdown-box"><div class="muted">No Active Positions</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div><hr style="border:0; border-top:1px solid var(--border); margin:15px 0;"><div class="muted">${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div><div style="font-size:24px; font-weight:bold; color:#fff;">${updateCountdown(d.next_event)}</div></div>`;
+            document.getElementById("pos-container").innerHTML = `<div class="countdown-box"><div class="muted">No Active Positions</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div><hr style="border:0; border-top:1px solid var(--border); margin:15px 0;"><div class="muted">${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div><div style="font-size:24px; font-weight:bold; color:#fff;">${updateCountdown(d.next_event)}</div></div>`;
         }
 
         document.getElementById("ranked").innerHTML = d.ranked.map(r => {
             const threshold = 0.15;
-            // Prevent division by zero if score is 0.0
             let estMins = r.score > 0 ? Math.round(((threshold-r.score)/r.score) * 15) : "---";
-            
             let status = r.score >= threshold ? "⚡ TRIGGERED" : (r.score > 0 ? `📈 Est. ${estMins}m to target` : "📉 Sleeping/Reversing");
             let color = r.score >= threshold ? "var(--green)" : (r.score > 0 ? "var(--orange)" : "var(--red)");
             return `<div style="padding:10px 0; border-bottom:1px solid var(--border);"><div style="display:flex; justify-content:space-between;"><b>${r.symbol}</b> <span>${r.score.toFixed(2)}%</span></div><div style="font-size:11px; color:${color}; font-weight:bold; margin-top:4px;">${status}</div></div>`;
