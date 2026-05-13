@@ -24,7 +24,6 @@ HEADERS = {
 PORT = int(os.environ.get("PORT", 7777))
 
 app = Flask(__name__)
-# Changed from eventlet to threading for flawless cloud stability
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading", ping_timeout=60, ping_interval=15)
 
 UNIVERSE = [
@@ -44,7 +43,7 @@ bot = {
     "reward_pct": 6.0   
 }
 
-activity_log = ["System Initialized... Logic Synchronized"]
+activity_log = ["System Initialized... Booting Hybrid Scanner"]
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -95,9 +94,13 @@ def place_order(symbol, current_price):
         qty = round(bot["trade_amount_usd"] / current_price, 5)
         take_profit = round(current_price * (1 + (bot["reward_pct"] / 100)), 2)
         stop_loss = round(current_price * (1 - (bot["risk_pct"] / 100)), 2)
+        
+        # Smart Time-In-Force: Stocks need DAY for fractions, Crypto needs GTC because it never closes
+        tif = "gtc" if "/" in symbol else "day"
+        
         payload = {
             "symbol": symbol, "qty": qty, "side": "buy", "type": "market",
-            "time_in_force": "day",
+            "time_in_force": tif,
             "order_class": "bracket",
             "take_profit": {"limit_price": take_profit},
             "stop_loss": {"stop_price": stop_loss}
@@ -105,6 +108,8 @@ def place_order(symbol, current_price):
         r = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
         if r.status_code == 200:
             log_event(f"BOUGHT {symbol} | Target: ${take_profit} | Stop: ${stop_loss}")
+        else:
+            log_event(f"ORDER REJECTED {symbol}: {r.json().get('message', 'Unknown Error')}")
     except Exception as e:
         log_event(f"ORDER ERROR: {str(e)}")
 
@@ -121,12 +126,25 @@ def get_bars(symbol):
     except: return None
 
 def score_symbol(symbol):
-    df = get_bars(symbol)
-    if df is None or len(df) < 20: return None
-    current_price = float(df["c"].iloc[-1])
-    past_price = float(df["c"].iloc[-15])
-    percent_change = ((current_price - past_price) / past_price) * 100
-    return {"symbol": symbol, "score": percent_change, "price": current_price}
+    try:
+        df = get_bars(symbol)
+        
+        # Safety Net: If API returns no data, return a default 0 score so it stays on UI
+        if df is None or len(df) < 2: 
+            return {"symbol": symbol, "score": 0.0, "price": 0.0}
+            
+        current_price = float(df["c"].iloc[-1])
+        # Use oldest available bar (up to 30 mins) instead of strictly 15 to prevent indexing crashes
+        past_price = float(df["c"].iloc[0]) 
+        
+        if past_price > 0:
+            percent_change = ((current_price - past_price) / past_price) * 100
+        else:
+            percent_change = 0.0
+            
+        return {"symbol": symbol, "score": percent_change, "price": current_price}
+    except:
+        return {"symbol": symbol, "score": 0.0, "price": 0.0}
 
 def engine():
     while True:
@@ -140,8 +158,10 @@ def engine():
                 run_daily_scanner()
                 bot["last_scan_date"] = curr_date
 
-            active_list = bot["watchlist"] if is_open else bot["crypto_watchlist"]
-            if not active_list: active_list = ["TSLA", "NVDA", "AMD", "COIN", "MARA"]
+            # ALWAYS combine stocks and crypto into one super-list
+            active_list = bot["watchlist"] + bot["crypto_watchlist"]
+            if len(bot["watchlist"]) == 0:
+                active_list = ["TSLA", "NVDA", "AMD", "COIN", "MARA"] + bot["crypto_watchlist"]
 
             ranked = []
             for s in active_list:
@@ -159,7 +179,7 @@ def engine():
 
             socketio.emit("update", {
                 "account": acc, "positions": pos,
-                "ranked": ranked[:8], "activity": activity_log[::-1],
+                "ranked": ranked[:10], "activity": activity_log[::-1], # Increased to show 10 items
                 "market_status": "MARKET OPEN" if is_open else "MARKET CLOSED",
                 "is_open": is_open, "next_event": clock_data.get('next_close', '') if is_open else clock_data.get('next_open', '')
             })
@@ -199,7 +219,7 @@ def home():
     <div class="pill" id="status">CONNECTING</div>
 </div>
 <div class="grid">
-    <div class="card"><div class="muted">Net Equity</div><div class="big" id="equity">$0.00</div><div class="muted">Buying Power</div><div id="cash" style="font-weight:bold;">$0.00</div><hr style="border:0; border-top:1px solid var(--border); margin:20px 0;"><div class="muted" style="margin-bottom:10px;">Scanned Daily Targets</div><div class="card-body" id="ranked"></div></div>
+    <div class="card"><div class="muted">Net Equity</div><div class="big" id="equity">$0.00</div><div class="muted">Buying Power</div><div id="cash" style="font-weight:bold;">$0.00</div><hr style="border:0; border-top:1px solid var(--border); margin:20px 0;"><div class="muted" style="margin-bottom:10px;">Scanned Active Targets</div><div class="card-body" id="ranked"></div></div>
     <div class="card"><div class="muted">Live 1:3 Risk/Reward Positions</div><div class="card-body" id="pos-container"><table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody id="pos-table"></tbody></table></div></div>
     <div class="card"><div class="muted">Execution Log</div><div class="card-body" id="logs" style="font-family:monospace; font-size:11px; color:#a1a1aa;"></div></div>
 </div>
@@ -234,7 +254,10 @@ def home():
 
         document.getElementById("ranked").innerHTML = d.ranked.map(r => {
             const threshold = 0.15;
-            let status = r.score >= threshold ? "⚡ TRIGGERED" : (r.score > 0 ? `📈 Est. ${Math.round(( (threshold-r.score)/r.score ) * 15)}m to target` : "📉 Awaiting Reversal");
+            // Prevent division by zero if score is 0.0
+            let estMins = r.score > 0 ? Math.round(((threshold-r.score)/r.score) * 15) : "---";
+            
+            let status = r.score >= threshold ? "⚡ TRIGGERED" : (r.score > 0 ? `📈 Est. ${estMins}m to target` : "📉 Sleeping/Reversing");
             let color = r.score >= threshold ? "var(--green)" : (r.score > 0 ? "var(--orange)" : "var(--red)");
             return `<div style="padding:10px 0; border-bottom:1px solid var(--border);"><div style="display:flex; justify-content:space-between;"><b>${r.symbol}</b> <span>${r.score.toFixed(2)}%</span></div><div style="font-size:11px; color:${color}; font-weight:bold; margin-top:4px;">${status}</div></div>`;
         }).join("");
