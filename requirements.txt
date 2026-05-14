@@ -1,5 +1,3 @@
 requests
 pandas
 Flask
-Flask-SocketIO
-gunicorn
