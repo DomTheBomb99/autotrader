@@ -43,7 +43,7 @@ bot = {
     "reward_pct": 6.0   
 }
 
-activity_log = ["System Initialized... Booting AI Risk Manager"]
+activity_log = ["System Initialized... Position Sizing Enabled"]
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -94,14 +94,15 @@ def place_order(symbol, current_price):
         qty = round(bot["trade_amount_usd"] / current_price, 5)
         tif = "gtc" if "/" in symbol else "day"
         
-        # Sent as a "Simple" Market Order to bypass Alpaca's fractional restriction
         payload = {
             "symbol": symbol, "qty": qty, "side": "buy", "type": "market",
             "time_in_force": tif
         }
         r = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
         if r.status_code == 200:
-            log_event(f"BOUGHT {symbol} | Engine actively managing Risk/Reward")
+            take_profit = round(current_price * (1 + (bot["reward_pct"] / 100)), 2)
+            stop_loss = round(current_price * (1 - (bot["risk_pct"] / 100)), 2)
+            log_event(f"BOUGHT {symbol} | Target: ${take_profit} | Stop: ${stop_loss}")
         else:
             log_event(f"ORDER REJECTED {symbol}: {r.json().get('message', 'Unknown Error')}")
     except Exception as e:
@@ -150,14 +151,10 @@ def engine():
             pos = get_positions()
             cash_available = float(acc.get("cash", 0))
 
-            # =======================================================
-            # AI RISK MANAGER: Software-based Stop Loss & Take Profit
-            # =======================================================
             for p in pos:
                 sym = p['symbol']
-                if sym == "USD": continue # Skip raw cash
+                if sym == "USD": continue 
                 
-                # Alpaca returns this as a decimal (e.g., 0.06 is 6%)
                 pl_pct = float(p.get("unrealized_plpc", 0)) * 100
                 
                 if pl_pct >= bot["reward_pct"]:
@@ -167,9 +164,6 @@ def engine():
                     log_event(f"🛡️ STOP LOSS: Selling {sym} to cut losses ({pl_pct:.2f}%).")
                     requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS)
 
-            # =======================================================
-            # BUYING LOGIC
-            # =======================================================
             active_list = bot["watchlist"] + bot["crypto_watchlist"]
             if len(bot["watchlist"]) == 0:
                 active_list = ["TSLA", "NVDA", "AMD", "COIN", "MARA"] + bot["crypto_watchlist"]
@@ -184,7 +178,6 @@ def engine():
             for r in ranked[:2]:
                 if r["score"] > 0.15:
                     if not any(p.get('symbol') == r['symbol'] for p in pos):
-                        # Wallet Check: Only buy if we actually have $20
                         if cash_available >= bot["trade_amount_usd"]:
                             place_order(r["symbol"], r["price"])
 
@@ -257,7 +250,20 @@ def home():
         if (d.positions.length > 0) {
             posContainer.innerHTML = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody>${d.positions.map(p => {
                 const entry = parseFloat(p.avg_entry_price);
-                return `<tr><td><b>${p.symbol}</b></td><td>${f.format(entry)}</td><td>${f.format(p.current_price)}</td><td style="color:${p.unrealized_intraday_pl >= 0 ? 'var(--green)' : 'var(--red)'}">${f.format(p.unrealized_intraday_pl)}</td><td style="color:var(--red)">${f.format(entry * 0.98)}</td><td style="color:var(--blue)">${f.format(entry * 1.06)}</td></tr>`;
+                const mktVal = parseFloat(p.market_value);
+                
+                // ADDED: Formatting the Asset column to show Shares and Market Value
+                return `<tr>
+                    <td>
+                        <b>${p.symbol}</b><br>
+                        <span style="font-size:10px; color:#9ca3af;">${p.qty} shs | ${f.format(mktVal)}</span>
+                    </td>
+                    <td>${f.format(entry)}</td>
+                    <td>${f.format(p.current_price)}</td>
+                    <td style="color:${p.unrealized_intraday_pl >= 0 ? 'var(--green)' : 'var(--red)'}">${f.format(p.unrealized_intraday_pl)}</td>
+                    <td style="color:var(--red)">${f.format(entry * 0.98)}</td>
+                    <td style="color:var(--blue)">${f.format(entry * 1.06)}</td>
+                </tr>`;
             }).join("")}</tbody></table>`;
         } else {
             posContainer.innerHTML = `<div class="countdown-box"><div class="muted">No Active Positions</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div><hr style="border:0; border-top:1px solid var(--border); margin:15px 0;"><div class="muted">${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div><div style="font-size:24px; font-weight:bold; color:#fff;">${updateCountdown(d.next_event)}</div></div>`;
