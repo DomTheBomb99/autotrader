@@ -8,7 +8,7 @@ from flask import Flask
 from flask_socketio import SocketIO
 
 # =========================================================
-# CONFIG - PAPER KEYS
+# CONFIG - HARDCODED PER USER REQUEST
 # =========================================================
 API_KEY = "PKFLSLLJIOI2P6BVOCOUOC37MS"
 API_SECRET = "2pNzQVEBscePX1zMBgBpjXDhCdSmmQWyX91Ps4JcDEvg"
@@ -21,11 +21,12 @@ HEADERS = {
     "APCA-API-SECRET-KEY": API_SECRET
 }
 
+# Render uses port 10000 by default
 PORT = int(os.environ.get("PORT", 10000))
 
 app = Flask(__name__)
-# Upgraded to use Gevent for flawless Render deployment
-socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60, ping_interval=15)
+# Using threading mode for maximum compatibility with Render/Python 3.13
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 UNIVERSE = [
     "AAPL", "TSLA", "NVDA", "AMD", "META", "AMZN", "MSFT", "GOOGL", "NFLX", 
@@ -46,7 +47,7 @@ bot = {
 }
 
 trailing_stops = {} 
-activity_log = ["System Initialized... Gunicorn Engine Online"]
+activity_log = ["System Initialized... Logic Synchronized"]
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -223,10 +224,8 @@ def home():
     <div class="card">
         <div class="muted">Net Equity</div>
         <div class="big" id="equity">$0.00</div>
-        
         <div class="muted" style="margin-top:20px;">Buying Power</div>
         <div id="cash" style="font-weight:bold; font-size:18px; margin-bottom:20px;">$0.00</div>
-        
         <hr style="border:0; border-top:1px solid var(--border); margin:20px 0;">
         <div class="muted" style="margin-bottom:10px;">Scanned Active Targets</div>
         <div id="ranked"></div>
@@ -234,7 +233,6 @@ def home():
     
     <!-- MIDDLE SECTION -->
     <div style="display:flex; flex-direction:column; gap:20px;">
-        <!-- Live Positions Card -->
         <div class="card">
             <div class="muted" style="margin-bottom:15px;">Live 1:3 Risk/Reward Positions</div>
             <div id="pos-container">
@@ -244,17 +242,13 @@ def home():
                 </table>
             </div>
         </div>
-
-        <!-- New Stats & Chart Card (Under Positions) -->
         <div class="card">
             <div class="muted">Session Performance</div>
             <div style="display:flex; justify-content:space-between; margin-top:10px;">
                 <div style="text-align:center;"><div class="muted">Wins</div><div id="winrate" style="font-size:20px; font-weight:bold; color:var(--green);">0</div></div>
                 <div style="text-align:center;"><div class="muted">Total Profit</div><div id="profit" style="font-size:20px; font-weight:bold; color:var(--green);">$0.00</div></div>
             </div>
-            <div class="chart-container">
-                <canvas id="equityChart"></canvas>
-            </div>
+            <div class="chart-container"><canvas id="equityChart"></canvas></div>
         </div>
     </div>
 
@@ -267,15 +261,10 @@ def home():
 
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-    const socket = io({ transports: ["websocket", "polling"], upgrade: true });
+    // FORCED POLLING: This ensures connection on Render Free Tier
+    const socket = io({ transports: ["polling"] });
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     
-    // UI Connection Logic
-    socket.on("connect", () => {
-        document.getElementById("status").innerText = "CONNECTED (WAITING...)";
-        document.getElementById("status").style.background = "var(--blue)";
-    });
-
     const ctx = document.getElementById('equityChart').getContext('2d');
     const eqChart = new Chart(ctx, {
         type: 'line',
@@ -295,7 +284,6 @@ def home():
         document.getElementById("status").innerText = "LIVE SYNC";
         document.getElementById("status").style.background = "var(--green)";
         document.getElementById("mkt").innerText = d.market_status;
-
         const currentEq = parseFloat(d.account.equity || 0);
         document.getElementById("equity").innerText = f.format(currentEq);
         document.getElementById("cash").innerText = f.format(d.account.cash);
@@ -354,5 +342,5 @@ def home():
 """
 
 if __name__ == "__main__":
-    threading.Thread(target=engine, daemon=True).start()
-    app.run(host="0.0.0.0", port=PORT)
+    # Standard Flask run is most reliable for polling on Render
+    socketio.run(app, host="0.0.0.0", port=PORT, allow_unsafe_werkzeug=True)
