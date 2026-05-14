@@ -4,8 +4,7 @@ import threading
 import requests
 import pandas as pd
 from datetime import datetime
-from flask import Flask
-from flask_socketio import SocketIO
+from flask import Flask, jsonify
 
 # =========================================================
 # CONFIG - HARDCODED PER USER REQUEST
@@ -24,8 +23,6 @@ HEADERS = {
 PORT = int(os.environ.get("PORT", 10000))
 
 app = Flask(__name__)
-# Forced threading mode for maximum compatibility
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 UNIVERSE = [
     "AAPL", "TSLA", "NVDA", "AMD", "META", "AMZN", "MSFT", "GOOGL", "NFLX", 
@@ -46,7 +43,21 @@ bot = {
 }
 
 trailing_stops = {} 
-activity_log = ["System Initialized... Engine Online"]
+activity_log = ["System Initialized... API Mode Engaged"]
+
+# ---------------------------------------------------------
+# NEW: The Global Vault (This holds data for the website to fetch)
+# ---------------------------------------------------------
+global_state = {
+    "account": {"equity": "0.00", "cash": "0.00"},
+    "positions": [],
+    "ranked": [],
+    "activity": activity_log[::-1],
+    "bot_stats": {"wins": 0, "profit": 0.0},
+    "market_status": "BOOTING ENGINE...",
+    "is_open": False,
+    "next_event": ""
+}
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -173,22 +184,28 @@ def engine():
                         multiplier = 1.0 if r["score"] < 0.30 else 1.5
                         place_order(r["symbol"], r["price"], multiplier)
 
-            socketio.emit("update", {
-                "account": acc, "positions": pos, "ranked": ranked[:10],
-                "activity": activity_log[::-1], 
-                "bot_stats": {"wins": bot["wins"], "profit": bot["total_profit"]},
-                "market_status": "MARKET OPEN" if is_open else "MARKET CLOSED",
-                "is_open": is_open, "next_event": clock_data.get('next_close', '') if is_open else clock_data.get('next_open', '')
-            })
+            # Update the Global Vault instead of trying to push via WebSockets
+            global_state["account"] = acc
+            global_state["positions"] = pos
+            global_state["ranked"] = ranked[:10]
+            global_state["activity"] = activity_log[::-1]
+            global_state["bot_stats"] = {"wins": bot["wins"], "profit": bot["total_profit"]}
+            global_state["market_status"] = "MARKET OPEN" if is_open else "MARKET CLOSED"
+            global_state["is_open"] = is_open
+            global_state["next_event"] = clock_data.get('next_close', '') if is_open else clock_data.get('next_open', '')
+
         except Exception as e:
             log_event(f"ENGINE ERROR: {str(e)}")
         time.sleep(10)
 
-
-# =========================================================
-# CRITICAL FIX: Start the engine OUTSIDE the blocked zone
-# =========================================================
 threading.Thread(target=engine, daemon=True).start()
+
+# ---------------------------------------------------------
+# NEW: The API Route (The Website asks this URL for data)
+# ---------------------------------------------------------
+@app.route("/api/data")
+def api_data():
+    return jsonify(global_state)
 
 @app.route("/")
 def home():
@@ -221,7 +238,7 @@ def home():
 <body>
 <div class="header">
     <div><span style="font-weight:900; font-size:18px;">QUANTUM<span style="color:var(--green)">PRO</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
-    <div class="pill" id="status" style="background:var(--orange)">CONNECTING</div>
+    <div class="pill" id="status" style="background:var(--orange)">FETCHING DATA...</div>
 </div>
 
 <div class="grid">
@@ -261,17 +278,14 @@ def home():
     </div>
 </div>
 
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-    // Forced Polling mode for Render
-    const socket = io({ transports: ["polling"] });
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     
     const ctx = document.getElementById('equityChart').getContext('2d');
     const eqChart = new Chart(ctx, {
         type: 'line',
         data: { labels: [], datasets: [{ data: [], borderColor: '#22c55e', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true, backgroundColor: 'rgba(34,197,94,0.1)' }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { display: false } } }
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { display: false } }, animation: { duration: 0 } }
     });
 
     function updateCountdown(endTime) {
@@ -282,66 +296,89 @@ def home():
         return `${h}h ${m}m ${s}s`;
     }
 
-    socket.on("update", (d) => {
-        document.getElementById("status").innerText = "LIVE SYNC";
-        document.getElementById("status").style.background = "var(--green)";
-        document.getElementById("mkt").innerText = d.market_status;
-        const currentEq = parseFloat(d.account.equity || 0);
-        document.getElementById("equity").innerText = f.format(currentEq);
-        document.getElementById("cash").innerText = f.format(d.account.cash);
-        document.getElementById("winrate").innerText = d.bot_stats.wins;
-        document.getElementById("profit").innerText = f.format(d.bot_stats.profit);
-        
-        if (currentEq > 0) {
-            eqChart.data.labels.push("");
-            eqChart.data.datasets[0].data.push(currentEq);
-            if(eqChart.data.labels.length > 50) { eqChart.data.labels.shift(); eqChart.data.datasets[0].data.shift(); }
-            eqChart.update();
+    // ---------------------------------------------------------
+    // NEW: HTTP Fetch Loop (100% Immune to WebSocket Blocking)
+    // ---------------------------------------------------------
+    async function fetchBotData() {
+        try {
+            const response = await fetch('/api/data');
+            const d = await response.json();
+
+            document.getElementById("status").innerText = "LIVE SYNC";
+            document.getElementById("status").style.background = "var(--green)";
+            document.getElementById("mkt").innerText = d.market_status;
+            
+            const currentEq = parseFloat(d.account.equity || 0);
+            document.getElementById("equity").innerText = f.format(currentEq);
+            document.getElementById("cash").innerText = f.format(d.account.cash);
+            document.getElementById("winrate").innerText = d.bot_stats.wins;
+            document.getElementById("profit").innerText = f.format(d.bot_stats.profit);
+            
+            if (currentEq > 0 && d.account.equity !== "0.00") {
+                eqChart.data.labels.push("");
+                eqChart.data.datasets[0].data.push(currentEq);
+                if(eqChart.data.labels.length > 50) { eqChart.data.labels.shift(); eqChart.data.datasets[0].data.shift(); }
+                eqChart.update();
+            }
+
+            const posContainer = document.getElementById("pos-container");
+            if (d.positions && d.positions.length > 0) {
+                posContainer.innerHTML = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody>\${d.positions.map(p => {
+                    const entry = parseFloat(p.avg_entry_price);
+                    const pl = parseFloat(p.unrealized_intraday_pl);
+                    return \`<tr>
+                        <td><b>\${p.symbol}</b><br><span style="font-size:10px; color:#9ca3af;">\${p.qty} shs</span></td>
+                        <td>\${f.format(entry)}</td>
+                        <td>\${f.format(p.current_price)}</td>
+                        <td style="color:\${pl >= 0 ? 'var(--green)' : 'var(--red)'}">\${f.format(pl)}<br><span style="font-size:10px;">(\${(parseFloat(p.unrealized_intraday_plpc)*100).toFixed(2)}%)</span></td>
+                        <td style="color:var(--red)">\${f.format(entry * 0.98)}</td>
+                        <td style="color:var(--blue)">\${f.format(entry * 1.06)}<br><span class="status-badge" style="background:rgba(59,130,246,0.1); color:var(--blue);">TRAILING</span></td>
+                    </tr>\`;
+                }).join("")}</tbody></table>`;
+            } else {
+                posContainer.innerHTML = \`<div class="countdown-box">
+                    <div class="muted">No Active Positions</div>
+                    <div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div>
+                    <hr style="border:0; border-top:1px solid var(--border); margin:15px 0;">
+                    <div class="muted">\${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div>
+                    <div style="font-size:24px; font-weight:bold; color:#fff;">\${updateCountdown(d.next_event)}</div>
+                </div>\`;
+            }
+
+            if (d.ranked) {
+                document.getElementById("ranked").innerHTML = d.ranked.map(r => {
+                    const threshold = 0.15;
+                    let status = r.score >= threshold ? "⚡ TRIGGERED" : (r.score > 0 ? \`📈 Est. \${Math.round(((threshold-r.score)/r.score)*15)}m\` : "📉 Awaiting Rev");
+                    let color = r.score >= threshold ? "var(--green)" : (r.score > 0 ? "var(--orange)" : "var(--red)");
+                    return \`<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:8px;">
+                        <div style="display:flex; justify-content:space-between; margin-bottom:4px;"><b>\${r.symbol}</b> <span>\${r.score.toFixed(2)}%</span></div>
+                        <div style="display:flex; gap:5px;">
+                            <span class="status-badge" style="background:rgba(255,255,255,0.05); color:\${color};">\${status}</span>
+                            \${r.vol_spike ? '<span class="status-badge" style="background:rgba(34,197,94,0.1); color:var(--green);">⚡ VOL SPIKE</span>' : ''}
+                        </div>
+                    </div>\`;
+                }).join("");
+            }
+
+            if (d.activity) {
+                document.getElementById("logs").innerHTML = d.activity.map(a => `<div style="padding:4px 0; border-bottom:1px solid #1f2937;">${a}</div>`).join("");
+            }
+            
+        } catch (error) {
+            document.getElementById("status").innerText = "NETWORK ERROR";
+            document.getElementById("status").style.background = "var(--red)";
+            console.error("Fetch Error:", error);
         }
+    }
 
-        const posContainer = document.getElementById("pos-container");
-        if (d.positions.length > 0) {
-            posContainer.innerHTML = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody>\${d.positions.map(p => {
-                const entry = parseFloat(p.avg_entry_price);
-                const pl = parseFloat(p.unrealized_intraday_pl);
-                return \`<tr>
-                    <td><b>\${p.symbol}</b><br><span style="font-size:10px; color:#9ca3af;">\${p.qty} shs</span></td>
-                    <td>\${f.format(entry)}</td>
-                    <td>\${f.format(p.current_price)}</td>
-                    <td style="color:\${pl >= 0 ? 'var(--green)' : 'var(--red)'}">\${f.format(pl)}<br><span style="font-size:10px;">(\${(parseFloat(p.unrealized_intraday_plpc)*100).toFixed(2)}%)</span></td>
-                    <td style="color:var(--red)">\${f.format(entry * 0.98)}</td>
-                    <td style="color:var(--blue)">\${f.format(entry * 1.06)}<br><span class="status-badge" style="background:rgba(59,130,246,0.1); color:var(--blue);">TRAILING</span></td>
-                </tr>\`;
-            }).join("")}</tbody></table>`;
-        } else {
-            posContainer.innerHTML = \`<div class="countdown-box">
-                <div class="muted">No Active Positions</div>
-                <div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div>
-                <hr style="border:0; border-top:1px solid var(--border); margin:15px 0;">
-                <div class="muted">\${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div>
-                <div style="font-size:24px; font-weight:bold; color:#fff;">\${updateCountdown(d.next_event)}</div>
-            </div>\`;
-        }
+    // Ping the server every 3 seconds to get fresh data
+    setInterval(fetchBotData, 3000);
+    fetchBotData(); // Call immediately on load
 
-        document.getElementById("ranked").innerHTML = d.ranked.map(r => {
-            const threshold = 0.15;
-            let status = r.score >= threshold ? "⚡ TRIGGERED" : (r.score > 0 ? \`📈 Est. \${Math.round(((threshold-r.score)/r.score)*15)}m\` : "📉 Awaiting Rev");
-            let color = r.score >= threshold ? "var(--green)" : (r.score > 0 ? "var(--orange)" : "var(--red)");
-            return \`<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:8px;">
-                <div style="display:flex; justify-content:space-between; margin-bottom:4px;"><b>\${r.symbol}</b> <span>\${r.score.toFixed(2)}%</span></div>
-                <div style="display:flex; gap:5px;">
-                    <span class="status-badge" style="background:rgba(255,255,255,0.05); color:\${color};">\${status}</span>
-                    \${r.vol_spike ? '<span class="status-badge" style="background:rgba(34,197,94,0.1); color:var(--green);">⚡ VOL SPIKE</span>' : ''}
-                </div>
-            </div>\`;
-        }).join("");
-
-        document.getElementById("logs").innerHTML = d.activity.map(a => `<div style="padding:4px 0; border-bottom:1px solid #1f2937;">${a}</div>`).join("");
-    });
 </script>
 </body>
 </html>
 """
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=PORT)
+    app.run(host="0.0.0.0", port=PORT, threaded=True)
