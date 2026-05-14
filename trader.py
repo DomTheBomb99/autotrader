@@ -43,11 +43,9 @@ bot = {
 }
 
 trailing_stops = {} 
-activity_log = ["System Initialized... API Mode Engaged"]
+activity_log = ["System Initialized... API Mode Online"]
 
-# ---------------------------------------------------------
-# NEW: The Global Vault (This holds data for the website to fetch)
-# ---------------------------------------------------------
+# The Global Vault for the Website to fetch
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
     "positions": [],
@@ -140,6 +138,7 @@ def score_symbol(symbol):
         return {"symbol": symbol, "score": 0.0, "price": 0.0, "vol_spike": False}
 
 def engine():
+    global global_state
     while True:
         try:
             clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS)
@@ -156,6 +155,7 @@ def engine():
 
             for p in pos:
                 sym = p.get('symbol')
+                if not sym: continue
                 curr_plpc = float(p.get("unrealized_plpc") or 0) * 100
                 pl_dollars = float(p.get("unrealized_pl") or 0)
                 if sym not in trailing_stops or curr_plpc > trailing_stops[sym]:
@@ -184,15 +184,17 @@ def engine():
                         multiplier = 1.0 if r["score"] < 0.30 else 1.5
                         place_order(r["symbol"], r["price"], multiplier)
 
-            # Update the Global Vault instead of trying to push via WebSockets
-            global_state["account"] = acc
-            global_state["positions"] = pos
-            global_state["ranked"] = ranked[:10]
-            global_state["activity"] = activity_log[::-1]
-            global_state["bot_stats"] = {"wins": bot["wins"], "profit": bot["total_profit"]}
-            global_state["market_status"] = "MARKET OPEN" if is_open else "MARKET CLOSED"
-            global_state["is_open"] = is_open
-            global_state["next_event"] = clock_data.get('next_close', '') if is_open else clock_data.get('next_open', '')
+            # Thread-safe snapshot update
+            global_state = {
+                "account": acc,
+                "positions": pos,
+                "ranked": ranked[:10],
+                "activity": activity_log[::-1],
+                "bot_stats": {"wins": bot["wins"], "profit": bot["total_profit"]},
+                "market_status": "MARKET OPEN" if is_open else "MARKET CLOSED",
+                "is_open": is_open,
+                "next_event": clock_data.get('next_close', '') if is_open else clock_data.get('next_open', '')
+            }
 
         except Exception as e:
             log_event(f"ENGINE ERROR: {str(e)}")
@@ -200,9 +202,7 @@ def engine():
 
 threading.Thread(target=engine, daemon=True).start()
 
-# ---------------------------------------------------------
-# NEW: The API Route (The Website asks this URL for data)
-# ---------------------------------------------------------
+# API Route to serve data
 @app.route("/api/data")
 def api_data():
     return jsonify(global_state)
@@ -296,9 +296,6 @@ def home():
         return `${h}h ${m}m ${s}s`;
     }
 
-    // ---------------------------------------------------------
-    // NEW: HTTP Fetch Loop (100% Immune to WebSocket Blocking)
-    // ---------------------------------------------------------
     async function fetchBotData() {
         try {
             const response = await fetch('/api/data');
@@ -323,40 +320,40 @@ def home():
 
             const posContainer = document.getElementById("pos-container");
             if (d.positions && d.positions.length > 0) {
-                posContainer.innerHTML = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody>\${d.positions.map(p => {
+                posContainer.innerHTML = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody>${d.positions.map(p => {
                     const entry = parseFloat(p.avg_entry_price);
                     const pl = parseFloat(p.unrealized_intraday_pl);
-                    return \`<tr>
-                        <td><b>\${p.symbol}</b><br><span style="font-size:10px; color:#9ca3af;">\${p.qty} shs</span></td>
-                        <td>\${f.format(entry)}</td>
-                        <td>\${f.format(p.current_price)}</td>
-                        <td style="color:\${pl >= 0 ? 'var(--green)' : 'var(--red)'}">\${f.format(pl)}<br><span style="font-size:10px;">(\${(parseFloat(p.unrealized_intraday_plpc)*100).toFixed(2)}%)</span></td>
-                        <td style="color:var(--red)">\${f.format(entry * 0.98)}</td>
-                        <td style="color:var(--blue)">\${f.format(entry * 1.06)}<br><span class="status-badge" style="background:rgba(59,130,246,0.1); color:var(--blue);">TRAILING</span></td>
-                    </tr>\`;
+                    return `<tr>
+                        <td><b>${p.symbol}</b><br><span style="font-size:10px; color:#9ca3af;">${p.qty} shs</span></td>
+                        <td>${f.format(entry)}</td>
+                        <td>${f.format(p.current_price)}</td>
+                        <td style="color:${pl >= 0 ? 'var(--green)' : 'var(--red)'}">${f.format(pl)}<br><span style="font-size:10px;">(${(parseFloat(p.unrealized_intraday_plpc)*100).toFixed(2)}%)</span></td>
+                        <td style="color:var(--red)">${f.format(entry * 0.98)}</td>
+                        <td style="color:var(--blue)">${f.format(entry * 1.06)}<br><span class="status-badge" style="background:rgba(59,130,246,0.1); color:var(--blue);">TRAILING</span></td>
+                    </tr>`;
                 }).join("")}</tbody></table>`;
             } else {
-                posContainer.innerHTML = \`<div class="countdown-box">
+                posContainer.innerHTML = `<div class="countdown-box">
                     <div class="muted">No Active Positions</div>
                     <div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div>
                     <hr style="border:0; border-top:1px solid var(--border); margin:15px 0;">
-                    <div class="muted">\${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div>
-                    <div style="font-size:24px; font-weight:bold; color:#fff;">\${updateCountdown(d.next_event)}</div>
-                </div>\`;
+                    <div class="muted">${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div>
+                    <div style="font-size:24px; font-weight:bold; color:#fff;">${updateCountdown(d.next_event)}</div>
+                </div>`;
             }
 
             if (d.ranked) {
                 document.getElementById("ranked").innerHTML = d.ranked.map(r => {
                     const threshold = 0.15;
-                    let status = r.score >= threshold ? "⚡ TRIGGERED" : (r.score > 0 ? \`📈 Est. \${Math.round(((threshold-r.score)/r.score)*15)}m\` : "📉 Awaiting Rev");
+                    let status = r.score >= threshold ? "⚡ TRIGGERED" : (r.score > 0 ? `📈 Est. ${Math.round(((threshold-r.score)/r.score)*15)}m` : "📉 Awaiting Rev");
                     let color = r.score >= threshold ? "var(--green)" : (r.score > 0 ? "var(--orange)" : "var(--red)");
-                    return \`<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:8px;">
-                        <div style="display:flex; justify-content:space-between; margin-bottom:4px;"><b>\${r.symbol}</b> <span>\${r.score.toFixed(2)}%</span></div>
+                    return `<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:8px;">
+                        <div style="display:flex; justify-content:space-between; margin-bottom:4px;"><b>${r.symbol}</b> <span>${r.score.toFixed(2)}%</span></div>
                         <div style="display:flex; gap:5px;">
-                            <span class="status-badge" style="background:rgba(255,255,255,0.05); color:\${color};">\${status}</span>
-                            \${r.vol_spike ? '<span class="status-badge" style="background:rgba(34,197,94,0.1); color:var(--green);">⚡ VOL SPIKE</span>' : ''}
+                            <span class="status-badge" style="background:rgba(255,255,255,0.05); color:${color};">${status}</span>
+                            ${r.vol_spike ? `<span class="status-badge" style="background:rgba(34,197,94,0.1); color:var(--green);">⚡ VOL SPIKE</span>` : ''}
                         </div>
-                    </div>\`;
+                    </div>`;
                 }).join("");
             }
 
@@ -365,15 +362,12 @@ def home():
             }
             
         } catch (error) {
-            document.getElementById("status").innerText = "NETWORK ERROR";
-            document.getElementById("status").style.background = "var(--red)";
             console.error("Fetch Error:", error);
         }
     }
 
-    // Ping the server every 3 seconds to get fresh data
     setInterval(fetchBotData, 3000);
-    fetchBotData(); // Call immediately on load
+    fetchBotData(); 
 
 </script>
 </body>
