@@ -43,7 +43,7 @@ bot = {
     "reward_pct": 6.0   
 }
 
-activity_log = ["System Initialized... Fixing Crypto Rejections"]
+activity_log = ["System Initialized... Booting AI Risk Manager"]
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -91,43 +91,19 @@ def get_positions():
 
 def place_order(symbol, current_price):
     try:
-        is_crypto = "/" in symbol
         qty = round(bot["trade_amount_usd"] / current_price, 5)
+        tif = "gtc" if "/" in symbol else "day"
         
-        # Calculate Exits
-        tp_price = current_price * (1 + (bot["reward_pct"] / 100))
-        sl_price = current_price * (1 - (bot["risk_pct"] / 100))
-
-        # Fix Error 1: Ensure at least $0.01 spread for crypto take-profit (DOGE Fix)
-        if is_crypto:
-            if (tp_price - current_price) < 0.01:
-                tp_price = current_price + 0.011
-            if (current_price - sl_price) < 0.01:
-                sl_price = current_price - 0.011
-
-        take_profit = round(tp_price, 4 if is_crypto else 2)
-        stop_loss = round(sl_price, 4 if is_crypto else 2)
-
-        # Fix Error 2: Use "simple" for Crypto, "bracket" for Stocks
-        if is_crypto:
-            payload = {
-                "symbol": symbol, "qty": qty, "side": "buy", "type": "market",
-                "time_in_force": "gtc"
-            }
-        else:
-            payload = {
-                "symbol": symbol, "qty": qty, "side": "buy", "type": "market",
-                "time_in_force": "day",
-                "order_class": "bracket",
-                "take_profit": {"limit_price": take_profit},
-                "stop_loss": {"stop_price": stop_loss}
-            }
-            
+        # Sent as a "Simple" Market Order to bypass Alpaca's fractional restriction
+        payload = {
+            "symbol": symbol, "qty": qty, "side": "buy", "type": "market",
+            "time_in_force": tif
+        }
         r = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
         if r.status_code == 200:
-            log_event(f"BOUGHT {symbol} | Target: ${take_profit} | Stop: ${stop_loss}")
+            log_event(f"BOUGHT {symbol} | Engine actively managing Risk/Reward")
         else:
-            log_event(f"REJECTED {symbol}: {r.text}")
+            log_event(f"ORDER REJECTED {symbol}: {r.json().get('message', 'Unknown Error')}")
     except Exception as e:
         log_event(f"ORDER ERROR: {str(e)}")
 
@@ -149,9 +125,14 @@ def score_symbol(symbol):
         if df is None or len(df) < 2: return {"symbol": symbol, "score": 0.0, "price": 0.0}
         current_price = float(df["c"].iloc[-1])
         past_price = float(df["c"].iloc[0]) 
-        percent_change = ((current_price - past_price) / past_price) * 100 if past_price > 0 else 0.0
+        
+        if past_price > 0:
+            percent_change = ((current_price - past_price) / past_price) * 100
+        else:
+            percent_change = 0.0
         return {"symbol": symbol, "score": percent_change, "price": current_price}
-    except: return {"symbol": symbol, "score": 0.0, "price": 0.0}
+    except:
+        return {"symbol": symbol, "score": 0.0, "price": 0.0}
 
 def engine():
     while True:
@@ -159,11 +140,36 @@ def engine():
             clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS)
             clock_data = clock_req.json() if clock_req.status_code == 200 else {}
             is_open = clock_data.get("is_open", False)
+            curr_date = clock_data.get('timestamp', '')[:10]
             
-            if is_open and bot["last_scan_date"] != clock_data.get('timestamp', '')[:10]:
+            if is_open and bot["last_scan_date"] != curr_date:
                 run_daily_scanner()
-                bot["last_scan_date"] = clock_data.get('timestamp', '')[:10]
+                bot["last_scan_date"] = curr_date
 
+            acc = get_account()
+            pos = get_positions()
+            cash_available = float(acc.get("cash", 0))
+
+            # =======================================================
+            # AI RISK MANAGER: Software-based Stop Loss & Take Profit
+            # =======================================================
+            for p in pos:
+                sym = p['symbol']
+                if sym == "USD": continue # Skip raw cash
+                
+                # Alpaca returns this as a decimal (e.g., 0.06 is 6%)
+                pl_pct = float(p.get("unrealized_plpc", 0)) * 100
+                
+                if pl_pct >= bot["reward_pct"]:
+                    log_event(f"🎯 TARGET HIT: Selling {sym} for +{pl_pct:.2f}% profit!")
+                    requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS)
+                elif pl_pct <= -bot["risk_pct"]:
+                    log_event(f"🛡️ STOP LOSS: Selling {sym} to cut losses ({pl_pct:.2f}%).")
+                    requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS)
+
+            # =======================================================
+            # BUYING LOGIC
+            # =======================================================
             active_list = bot["watchlist"] + bot["crypto_watchlist"]
             if len(bot["watchlist"]) == 0:
                 active_list = ["TSLA", "NVDA", "AMD", "COIN", "MARA"] + bot["crypto_watchlist"]
@@ -174,24 +180,13 @@ def engine():
                 if r: ranked.append(r)
 
             ranked.sort(key=lambda x: x["score"], reverse=True)
-            acc = get_account()
-            pos = get_positions()
 
-            # 1. HANDLE BUYING
             for r in ranked[:2]:
                 if r["score"] > 0.15:
                     if not any(p.get('symbol') == r['symbol'] for p in pos):
-                        place_order(r["symbol"], r["price"])
-
-            # 2. HANDLE CRYPTO EXITS (Manual SL/TP since we can't use brackets)
-            for p in pos:
-                if "/" in p['symbol']:
-                    entry = float(p['avg_entry_price'])
-                    curr = float(p['current_price'])
-                    gain = ((curr - entry) / entry) * 100
-                    if gain >= bot["reward_pct"] or gain <= -bot["risk_pct"]:
-                        log_event(f"EXIT {p['symbol']} at {gain:.2f}%")
-                        requests.delete(f"{BASE_URL}/v2/positions/{p['symbol']}", headers=HEADERS)
+                        # Wallet Check: Only buy if we actually have $20
+                        if cash_available >= bot["trade_amount_usd"]:
+                            place_order(r["symbol"], r["price"])
 
             socketio.emit("update", {
                 "account": acc, "positions": pos,
@@ -241,7 +236,10 @@ def home():
 </div>
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-    const socket = io({ transports: ["websocket", "polling"], upgrade: true });
+    const socket = io({
+        transports: ["websocket", "polling"],
+        upgrade: true
+    });
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     function updateCountdown(endTime) {
         if (!endTime) return "Calculating...";
@@ -255,18 +253,14 @@ def home():
         document.getElementById("equity").innerText = f.format(d.account.equity); document.getElementById("cash").innerText = f.format(d.account.cash);
         document.getElementById("mkt").innerText = d.market_status;
 
-        const posContainer = document.getElementById("pos-table");
+        const posContainer = document.getElementById("pos-container");
         if (d.positions.length > 0) {
-            posContainer.innerHTML = d.positions.map(p => {
+            posContainer.innerHTML = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody>${d.positions.map(p => {
                 const entry = parseFloat(p.avg_entry_price);
-                const isCrypto = p.symbol.includes("/");
-                // For crypto, the bot manages exits manually, so we show what it's aiming for
-                const sl = isCrypto ? entry * 0.98 : (p.stop_loss || entry * 0.98);
-                const tp = isCrypto ? entry * 1.06 : (p.take_profit || entry * 1.06);
-                return `<tr><td><b>${p.symbol}</b></td><td>${f.format(entry)}</td><td>${f.format(p.current_price)}</td><td style="color:${p.unrealized_intraday_pl >= 0 ? 'var(--green)' : 'var(--red)'}">${f.format(p.unrealized_intraday_pl)}</td><td style="color:var(--red)">${f.format(sl)}</td><td style="color:var(--blue)">${f.format(tp)}</td></tr>`;
-            }).join("");
+                return `<tr><td><b>${p.symbol}</b></td><td>${f.format(entry)}</td><td>${f.format(p.current_price)}</td><td style="color:${p.unrealized_intraday_pl >= 0 ? 'var(--green)' : 'var(--red)'}">${f.format(p.unrealized_intraday_pl)}</td><td style="color:var(--red)">${f.format(entry * 0.98)}</td><td style="color:var(--blue)">${f.format(entry * 1.06)}</td></tr>`;
+            }).join("")}</tbody></table>`;
         } else {
-            document.getElementById("pos-container").innerHTML = `<div class="countdown-box"><div class="muted">No Active Positions</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div><hr style="border:0; border-top:1px solid var(--border); margin:15px 0;"><div class="muted">${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div><div style="font-size:24px; font-weight:bold; color:#fff;">${updateCountdown(d.next_event)}</div></div>`;
+            posContainer.innerHTML = `<div class="countdown-box"><div class="muted">No Active Positions</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div><hr style="border:0; border-top:1px solid var(--border); margin:15px 0;"><div class="muted">${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div><div style="font-size:24px; font-weight:bold; color:#fff;">${updateCountdown(d.next_event)}</div></div>`;
         }
 
         document.getElementById("ranked").innerHTML = d.ranked.map(r => {
@@ -276,7 +270,12 @@ def home():
             let color = r.score >= threshold ? "var(--green)" : (r.score > 0 ? "var(--orange)" : "var(--red)");
             return `<div style="padding:10px 0; border-bottom:1px solid var(--border);"><div style="display:flex; justify-content:space-between;"><b>${r.symbol}</b> <span>${r.score.toFixed(2)}%</span></div><div style="font-size:11px; color:${color}; font-weight:bold; margin-top:4px;">${status}</div></div>`;
         }).join("");
-        document.getElementById("logs").innerHTML = d.activity.map(a => `<div style="padding:4px 0; border-bottom:1px solid #1f2937;">${a}</div>`).join("");
+        
+        document.getElementById("logs").innerHTML = d.activity.map(a => `<div style="padding:4px 0; border-bottom:1px solid #1f2937;">
+            ${a.includes('TARGET HIT') ? `<span style="color:var(--green)">${a}</span>` : 
+              a.includes('STOP LOSS') ? `<span style="color:var(--red)">${a}</span>` : 
+              a.includes('ERROR') || a.includes('REJECTED') ? `<span style="color:var(--red)">${a}</span>` : a}
+        </div>`).join("");
     });
 </script>
 </body>
