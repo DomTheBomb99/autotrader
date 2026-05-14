@@ -36,14 +36,17 @@ bot = {
     "running": True,
     "watchlist": [], 
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"],
-    "trade_amount_usd": 20.00,
-    "last_eod_date": "",
+    "base_trade_usd": 20.00,
     "last_scan_date": "",
     "risk_pct": 2.0,    
-    "reward_pct": 6.0   
+    "reward_pct": 6.0,
+    "equity_history": [] # For the upcoming chart
 }
 
-activity_log = ["System Initialized... Position Sizing Enabled"]
+# Tracking high-water marks for trailing stops
+trailing_stops = {} 
+
+activity_log = ["System Initialized... Aggressive Logic Engaged"]
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -54,7 +57,6 @@ def log_event(msg):
         activity_log.pop(0)
 
 def run_daily_scanner():
-    log_event("📡 SCANNER: Pulling top movers for today...")
     try:
         url = f"{DATA_URL}/stocks/snapshots"
         params = {"symbols": ",".join(UNIVERSE), "feed": "iex"}
@@ -71,9 +73,8 @@ def run_daily_scanner():
                     movers.append({"symbol": symbol, "change": pct_change})
             except: continue
         movers.sort(key=lambda x: x["change"], reverse=True)
-        top_5 = [m["symbol"] for m in movers[:5]]
-        bot["watchlist"] = top_5
-        log_event(f"🎯 TARGETS: {', '.join(top_5)}")
+        bot["watchlist"] = [m["symbol"] for m in movers[:5]]
+        log_event(f"🎯 NEW TARGETS LOCKED")
         return True
     except: return False
 
@@ -89,29 +90,26 @@ def get_positions():
         return r.json() if r.status_code == 200 else []
     except: return []
 
-def place_order(symbol, current_price):
+def place_order(symbol, current_price, strength_multiplier):
     try:
-        qty = round(bot["trade_amount_usd"] / current_price, 5)
+        # Dynamic Position Sizing: Scale up based on signal strength
+        trade_val = bot["base_trade_usd"] * strength_multiplier
+        qty = round(trade_val / current_price, 5)
         tif = "gtc" if "/" in symbol else "day"
         
-        payload = {
-            "symbol": symbol, "qty": qty, "side": "buy", "type": "market",
-            "time_in_force": tif
-        }
+        payload = {"symbol": symbol, "qty": qty, "side": "buy", "type": "market", "time_in_force": tif}
         r = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
         if r.status_code == 200:
-            take_profit = round(current_price * (1 + (bot["reward_pct"] / 100)), 2)
-            stop_loss = round(current_price * (1 - (bot["risk_pct"] / 100)), 2)
-            log_event(f"BOUGHT {symbol} | Target: ${take_profit} | Stop: ${stop_loss}")
+            log_event(f"🔥 AGGRESSIVE BUY: {symbol} (${trade_val:.2f})")
         else:
-            log_event(f"ORDER REJECTED {symbol}: {r.json().get('message', 'Unknown Error')}")
+            log_event(f"REJECTED: {r.json().get('message')}")
     except Exception as e:
         log_event(f"ORDER ERROR: {str(e)}")
 
 def get_bars(symbol):
     is_crypto = "/" in symbol
     url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/{symbol}/bars"
-    params = {"symbols": symbol, "timeframe": "1Min", "limit": 30} if is_crypto else {"timeframe": "1Min", "limit": 30, "feed": "iex"}
+    params = {"symbols": symbol, "timeframe": "1Min", "limit": 31} if is_crypto else {"timeframe": "1Min", "limit": 31, "feed": "iex"}
     try:
         r = requests.get(url, headers=HEADERS, params=params)
         if r.status_code != 200: return None
@@ -123,17 +121,20 @@ def get_bars(symbol):
 def score_symbol(symbol):
     try:
         df = get_bars(symbol)
-        if df is None or len(df) < 2: return {"symbol": symbol, "score": 0.0, "price": 0.0}
-        current_price = float(df["c"].iloc[-1])
-        past_price = float(df["c"].iloc[0]) 
+        if df is None or len(df) < 20: return {"symbol": symbol, "score": 0.0, "price": 0.0, "vol_spike": False}
         
-        if past_price > 0:
-            percent_change = ((current_price - past_price) / past_price) * 100
-        else:
-            percent_change = 0.0
-        return {"symbol": symbol, "score": percent_change, "price": current_price}
+        current_price = float(df["c"].iloc[-1])
+        past_price = float(df["c"].iloc[0])
+        
+        # Volume Spike Logic
+        avg_vol = df["v"].iloc[:-1].mean()
+        curr_vol = df["v"].iloc[-1]
+        vol_spike = curr_vol > (avg_vol * 1.5) # 50% increase in volume
+        
+        pct_change = ((current_price - past_price) / past_price) * 100
+        return {"symbol": symbol, "score": pct_change, "price": current_price, "vol_spike": vol_spike}
     except:
-        return {"symbol": symbol, "score": 0.0, "price": 0.0}
+        return {"symbol": symbol, "score": 0.0, "price": 0.0, "vol_spike": False}
 
 def engine():
     while True:
@@ -141,51 +142,50 @@ def engine():
             clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS)
             clock_data = clock_req.json() if clock_req.status_code == 200 else {}
             is_open = clock_data.get("is_open", False)
-            curr_date = clock_data.get('timestamp', '')[:10]
             
-            if is_open and bot["last_scan_date"] != curr_date:
-                run_daily_scanner()
-                bot["last_scan_date"] = curr_date
-
             acc = get_account()
             pos = get_positions()
-            cash_available = float(acc.get("cash", 0))
+            cash = float(acc.get("cash", 0))
 
+            # --- AI RISK MANAGER (Trailing Stop Logic) ---
             for p in pos:
                 sym = p['symbol']
-                if sym == "USD": continue 
+                curr_plpc = float(p.get("unrealized_plpc", 0)) * 100
                 
-                pl_pct = float(p.get("unrealized_plpc", 0)) * 100
+                # Update the "High Water Mark" for trailing
+                if sym not in trailing_stops or curr_plpc > trailing_stops[sym]:
+                    trailing_stops[sym] = curr_plpc
                 
-                if pl_pct >= bot["reward_pct"]:
-                    log_event(f"🎯 TARGET HIT: Selling {sym} for +{pl_pct:.2f}% profit!")
+                # If price drops 2% from the highest point it reached, SELL
+                if (trailing_stops[sym] - curr_plpc) >= bot["risk_pct"]:
+                    log_event(f"🛡️ TRAILING STOP: {sym} closed at {curr_plpc:.2f}%")
                     requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS)
-                elif pl_pct <= -bot["risk_pct"]:
-                    log_event(f"🛡️ STOP LOSS: Selling {sym} to cut losses ({pl_pct:.2f}%).")
+                    if sym in trailing_stops: del trailing_stops[sym]
+                
+                # Take profit at +6% regardless
+                elif curr_plpc >= bot["reward_pct"]:
+                    log_event(f"🎯 TARGET HIT: {sym} (+{curr_plpc:.2f}%)")
                     requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS)
+                    if sym in trailing_stops: del trailing_stops[sym]
 
+            # --- BUYING LOGIC with Volume Confirmation ---
             active_list = bot["watchlist"] + bot["crypto_watchlist"]
-            if len(bot["watchlist"]) == 0:
-                active_list = ["TSLA", "NVDA", "AMD", "COIN", "MARA"] + bot["crypto_watchlist"]
-
-            ranked = []
-            for s in active_list:
-                r = score_symbol(s)
-                if r: ranked.append(r)
-
+            ranked = [score_symbol(s) for s in active_list]
+            ranked = [r for r in ranked if r is not None]
             ranked.sort(key=lambda x: x["score"], reverse=True)
 
             for r in ranked[:2]:
-                if r["score"] > 0.15:
-                    if not any(p.get('symbol') == r['symbol'] for p in pos):
-                        if cash_available >= bot["trade_amount_usd"]:
-                            place_order(r["symbol"], r["price"])
+                # Require BOTH price momentum AND volume spike
+                if r["score"] > 0.15 and r["vol_spike"]:
+                    if not any(p.get('symbol') == r['symbol'] for p in pos) and cash >= bot["base_trade_usd"]:
+                        # Strength Multiplier: Higher score = Higher bet
+                        multiplier = 1.0 if r["score"] < 0.30 else 1.5
+                        place_order(r["symbol"], r["price"], multiplier)
 
             socketio.emit("update", {
-                "account": acc, "positions": pos,
-                "ranked": ranked[:10], "activity": activity_log[::-1],
-                "market_status": "MARKET OPEN" if is_open else "MARKET CLOSED",
-                "is_open": is_open, "next_event": clock_data.get('next_close', '') if is_open else clock_data.get('next_open', '')
+                "account": acc, "positions": pos, "ranked": ranked[:10],
+                "activity": activity_log[::-1], "market_status": "OPEN" if is_open else "CLOSED",
+                "next_event": clock_data.get('next_close', '') if is_open else clock_data.get('next_open', '')
             })
         except Exception as e:
             log_event(f"ENGINE ERROR: {str(e)}")
@@ -198,90 +198,92 @@ def home():
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>QuantumBot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QuantumBot Pro</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
     :root { --bg: #0b1220; --card: #111827; --border: #1f2937; --text: #e5e7eb; --green: #22c55e; --red: #ef4444; --orange: #f59e0b; --blue: #3b82f6; }
-    body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system, sans-serif; }
-    .header { display:flex; justify-content:space-between; align-items:center; padding:15px 25px; background:var(--card); border-bottom:1px solid var(--border); }
-    .grid { display:grid; grid-template-columns:300px 1fr 350px; gap:20px; padding:20px; height: calc(100vh - 80px); }
-    .card { background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:12px; padding:20px; display:flex; flex-direction:column; overflow:hidden; }
-    .card-body { overflow-y:auto; flex-grow:1; }
-    .muted { color:#9ca3af; font-size:11px; text-transform:uppercase; font-weight:800; letter-spacing:1px; }
-    .big { font-size:32px; font-weight:bold; color:#fff; margin: 10px 0; }
-    table { width:100%; border-collapse:collapse; font-size:13px; text-align:left; }
-    th { color:#9ca3af; padding-bottom:12px; border-bottom:1px solid var(--border); }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:sans-serif; }
+    .header { display:flex; justify-content:space-between; padding:15px 25px; background:var(--card); border-bottom:1px solid var(--border); }
+    .grid { display:grid; grid-template-columns:300px 1fr 350px; gap:20px; padding:20px; }
+    .card { background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:12px; padding:20px; }
+    .big { font-size:32px; font-weight:bold; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
     td { padding:12px 0; border-bottom:1px solid var(--border); }
-    .pill { background:#4b5563; color:#fff; padding:4px 10px; border-radius:20px; font-size:11px; font-weight:900; }
-    .countdown-box { text-align:center; padding:40px 20px; border: 2px dashed var(--border); border-radius:10px; margin-top:20px; }
-    @media (max-width: 1024px) { .grid { grid-template-columns: 1fr; height: auto; } .card { max-height: 500px; } }
+    .status-badge { font-size:10px; padding:2px 6px; border-radius:4px; font-weight:bold; margin-top:4px; display:inline-block; }
+    @media (max-width: 1024px) { .grid { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 <div class="header">
-    <div><span style="font-weight:900; font-size:18px;">QUANTUM<span style="color:var(--green)">BOT</span></span><span id="mkt" style="margin-left:20px; font-size:12px; color:#9ca3af; font-weight:bold;">...</span></div>
-    <div class="pill" id="status">CONNECTING</div>
+    <div style="font-weight:900;">QUANTUM<span style="color:var(--green)">PRO</span></div>
+    <div id="status" style="font-size:11px; font-weight:bold; color:var(--green);">LIVE SYNC</div>
 </div>
+
 <div class="grid">
-    <div class="card"><div class="muted">Net Equity</div><div class="big" id="equity">$0.00</div><div class="muted">Buying Power</div><div id="cash" style="font-weight:bold;">$0.00</div><hr style="border:0; border-top:1px solid var(--border); margin:20px 0;"><div class="muted" style="margin-bottom:10px;">Scanned Active Targets</div><div class="card-body" id="ranked"></div></div>
-    <div class="card"><div class="muted">Live 1:3 Risk/Reward Positions</div><div class="card-body" id="pos-container"><table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody id="pos-table"></tbody></table></div></div>
-    <div class="card"><div class="muted">Execution Log</div><div class="card-body" id="logs" style="font-family:monospace; font-size:11px; color:#a1a1aa;"></div></div>
+    <div class="card">
+        <div class="big" id="equity">$0.00</div>
+        <canvas id="equityChart" style="height:100px; margin:15px 0;"></canvas>
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-top:10px;">
+            <div id="winrate">Wins: 0</div>
+            <div id="profit">Profit: $0.00</div>
+        </div>
+        <hr style="border:0; border-top:1px solid var(--border); margin:20px 0;">
+        <div id="ranked"></div>
+    </div>
+    
+    <div class="card">
+        <div style="margin-bottom:15px; font-weight:bold;">Live Positions</div>
+        <div id="pos-container">
+            <table><tbody id="pos-table"></tbody></table>
+        </div>
+    </div>
+
+    <div class="card">
+        <div style="margin-bottom:15px; font-weight:bold;">Execution Log</div>
+        <div id="logs" style="font-family:monospace; font-size:11px;"></div>
+    </div>
 </div>
+
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-    const socket = io({
-        transports: ["websocket", "polling"],
-        upgrade: true
-    });
+    const socket = io({ transports: ["websocket", "polling"] });
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
-    function updateCountdown(endTime) {
-        if (!endTime) return "Calculating...";
-        const diff = new Date(endTime) - new Date();
-        if (diff <= 0) return "Closing Session...";
-        const h = Math.floor(diff / 3600000), m = Math.floor((diff % 3600000) / 60000), s = Math.floor((diff % 60000) / 1000);
-        return `${h}h ${m}m ${s}s`;
-    }
+    
+    // Scorecard tracking
+    let wins = 0;
+    let totalProfit = 0;
+
     socket.on("update", (d) => {
-        document.getElementById("status").innerText = "LIVE SYNC"; document.getElementById("status").style.background = "#22c55e";
-        document.getElementById("equity").innerText = f.format(d.account.equity); document.getElementById("cash").innerText = f.format(d.account.cash);
-        document.getElementById("mkt").innerText = d.market_status;
+        document.getElementById("equity").innerText = f.format(d.account.equity);
+        
+        // Render Positions
+        document.getElementById("pos-table").innerHTML = d.positions.map(p => {
+            const pl = parseFloat(p.unrealized_intraday_pl);
+            return `<tr>
+                <td><b>${p.symbol}</b><br><span style="font-size:10px;">${p.qty} shs</span></td>
+                <td style="color:${pl >= 0 ? 'var(--green)' : 'var(--red)'}">${f.format(pl)}</td>
+                <td><span class="status-badge" style="background:rgba(59,130,246,0.2); color:var(--blue);">TRAILING STOP ON</span></td>
+            </tr>`;
+        }).join("");
 
-        const posContainer = document.getElementById("pos-container");
-        if (d.positions.length > 0) {
-            posContainer.innerHTML = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody>${d.positions.map(p => {
-                const entry = parseFloat(p.avg_entry_price);
-                const mktVal = parseFloat(p.market_value);
-                
-                // ADDED: Formatting the Asset column to show Shares and Market Value
-                return `<tr>
-                    <td>
-                        <b>${p.symbol}</b><br>
-                        <span style="font-size:10px; color:#9ca3af;">${p.qty} shs | ${f.format(mktVal)}</span>
-                    </td>
-                    <td>${f.format(entry)}</td>
-                    <td>${f.format(p.current_price)}</td>
-                    <td style="color:${p.unrealized_intraday_pl >= 0 ? 'var(--green)' : 'var(--red)'}">${f.format(p.unrealized_intraday_pl)}</td>
-                    <td style="color:var(--red)">${f.format(entry * 0.98)}</td>
-                    <td style="color:var(--blue)">${f.format(entry * 1.06)}</td>
-                </tr>`;
-            }).join("")}</tbody></table>`;
-        } else {
-            posContainer.innerHTML = `<div class="countdown-box"><div class="muted">No Active Positions</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div><hr style="border:0; border-top:1px solid var(--border); margin:15px 0;"><div class="muted">${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div><div style="font-size:24px; font-weight:bold; color:#fff;">${updateCountdown(d.next_event)}</div></div>`;
-        }
+        // Render Targets with Vol Spike Badge
+        document.getElementById("ranked").innerHTML = d.ranked.map(r => `
+            <div style="margin-bottom:12px;">
+                <div style="display:flex; justify-content:space-between;"><b>${r.symbol}</b> <span>${r.score.toFixed(2)}%</span></div>
+                <div class="status-badge" style="background:${r.vol_spike ? 'rgba(34,197,94,0.2)' : 'rgba(255,255,255,0.05)'}; color:${r.vol_spike ? 'var(--green)' : '#666'}">
+                    ${r.vol_spike ? '⚡ VOLUME SPIKE' : 'SCANNING VOL'}
+                </div>
+            </div>
+        `).join("");
 
-        document.getElementById("ranked").innerHTML = d.ranked.map(r => {
-            const threshold = 0.15;
-            let estMins = r.score > 0 ? Math.round(((threshold-r.score)/r.score) * 15) : "---";
-            let status = r.score >= threshold ? "⚡ TRIGGERED" : (r.score > 0 ? `📈 Est. ${estMins}m to target` : "📉 Sleeping/Reversing");
-            let color = r.score >= threshold ? "var(--green)" : (r.score > 0 ? "var(--orange)" : "var(--red)");
-            return `<div style="padding:10px 0; border-bottom:1px solid var(--border);"><div style="display:flex; justify-content:space-between;"><b>${r.symbol}</b> <span>${r.score.toFixed(2)}%</span></div><div style="font-size:11px; color:${color}; font-weight:bold; margin-top:4px;">${status}</div></div>`;
+        // Render Logs & Check for wins
+        document.getElementById("logs").innerHTML = d.activity.map(a => {
+            if(a.includes("TARGET HIT") && !a.dataset_seen) { wins++; a.dataset_seen = true; }
+            return `<div style="padding:4px 0; border-bottom:1px solid #1f2937;">${a}</div>`;
         }).join("");
         
-        document.getElementById("logs").innerHTML = d.activity.map(a => `<div style="padding:4px 0; border-bottom:1px solid #1f2937;">
-            ${a.includes('TARGET HIT') ? `<span style="color:var(--green)">${a}</span>` : 
-              a.includes('STOP LOSS') ? `<span style="color:var(--red)">${a}</span>` : 
-              a.includes('ERROR') || a.includes('REJECTED') ? `<span style="color:var(--red)">${a}</span>` : a}
-        </div>`).join("");
+        document.getElementById("winrate").innerText = `Wins: ${wins}`;
     });
 </script>
 </body>
