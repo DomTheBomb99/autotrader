@@ -21,11 +21,10 @@ HEADERS = {
     "APCA-API-SECRET-KEY": API_SECRET
 }
 
-# Render uses port 10000 by default
 PORT = int(os.environ.get("PORT", 10000))
 
 app = Flask(__name__)
-# Using threading mode for maximum compatibility with Render/Python 3.13
+# Forced threading mode for maximum compatibility
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 UNIVERSE = [
@@ -47,7 +46,7 @@ bot = {
 }
 
 trailing_stops = {} 
-activity_log = ["System Initialized... Logic Synchronized"]
+activity_log = ["System Initialized... Engine Online"]
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -185,6 +184,12 @@ def engine():
             log_event(f"ENGINE ERROR: {str(e)}")
         time.sleep(10)
 
+
+# =========================================================
+# CRITICAL FIX: Start the engine OUTSIDE the blocked zone
+# =========================================================
+threading.Thread(target=engine, daemon=True).start()
+
 @app.route("/")
 def home():
     return """
@@ -220,7 +225,6 @@ def home():
 </div>
 
 <div class="grid">
-    <!-- LEFT SIDEBAR -->
     <div class="card">
         <div class="muted">Net Equity</div>
         <div class="big" id="equity">$0.00</div>
@@ -231,7 +235,6 @@ def home():
         <div id="ranked"></div>
     </div>
     
-    <!-- MIDDLE SECTION -->
     <div style="display:flex; flex-direction:column; gap:20px;">
         <div class="card">
             <div class="muted" style="margin-bottom:15px;">Live 1:3 Risk/Reward Positions</div>
@@ -252,7 +255,6 @@ def home():
         </div>
     </div>
 
-    <!-- RIGHT SIDEBAR -->
     <div class="card">
         <div class="muted" style="margin-bottom:15px;">Execution Log</div>
         <div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div>
@@ -261,7 +263,7 @@ def home():
 
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-    // FORCED POLLING: This ensures connection on Render Free Tier
+    // Forced Polling mode for Render
     const socket = io({ transports: ["polling"] });
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     
@@ -342,5 +344,4 @@ def home():
 """
 
 if __name__ == "__main__":
-    # Standard Flask run is most reliable for polling on Render
-    socketio.run(app, host="0.0.0.0", port=PORT, allow_unsafe_werkzeug=True)
+    socketio.run(app, host="0.0.0.0", port=PORT)
