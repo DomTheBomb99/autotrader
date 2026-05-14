@@ -24,6 +24,7 @@ HEADERS = {
 PORT = int(os.environ.get("PORT", 7777))
 
 app = Flask(__name__)
+# Engine configuration
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading", ping_timeout=60, ping_interval=15)
 
 UNIVERSE = [
@@ -45,7 +46,7 @@ bot = {
 }
 
 trailing_stops = {} 
-activity_log = ["System Initialized... Layout Balanced"]
+activity_log = ["System Initialized... Polling Mode Engaged"]
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -266,7 +267,9 @@ def home():
 
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-    const socket = io({ transports: ["websocket", "polling"], upgrade: true });
+    // FIX: Forced "polling" only. Bypasses the Werkzeug Python 3.13 WebSocket Crash.
+    const socket = io({ transports: ["polling"], upgrade: false });
+    
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     
     // Initialize Chart
