@@ -1,4 +1,3 @@
-
 import os
 import time
 import threading
@@ -11,8 +10,8 @@ from flask_socketio import SocketIO
 # =========================================================
 # CONFIG - PAPER KEYS
 # =========================================================
-API_KEY = "PKRY2XRZW4K4TWX4NYSEROPQEK"
-API_SECRET = "8pySz6LGdhjNr8tHfbgMcCgF2cK5Qd3afmy4CbwmZznQ"
+API_KEY = "PKFLSLLJIOI2P6BVOCOUOC37MS"
+API_SECRET = "2pNzQVEBscePX1zMBgBpjXDhCdSmmQWyX91Ps4JcDEvg"
 
 BASE_URL = "https://paper-api.alpaca.markets"
 DATA_URL = "https://data.alpaca.markets/v2"
@@ -22,11 +21,11 @@ HEADERS = {
     "APCA-API-SECRET-KEY": API_SECRET
 }
 
-PORT = int(os.environ.get("PORT", 7777))
+PORT = int(os.environ.get("PORT", 10000))
 
 app = Flask(__name__)
-# Engine configuration
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading", ping_timeout=60, ping_interval=15)
+# Upgraded to use Gevent for flawless Render deployment
+socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60, ping_interval=15)
 
 UNIVERSE = [
     "AAPL", "TSLA", "NVDA", "AMD", "META", "AMZN", "MSFT", "GOOGL", "NFLX", 
@@ -47,7 +46,7 @@ bot = {
 }
 
 trailing_stops = {} 
-activity_log = ["System Initialized... Polling Mode Engaged"]
+activity_log = ["System Initialized... Gunicorn Engine Online"]
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -268,12 +267,15 @@ def home():
 
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-    // FIX: Forced "polling" only. Bypasses the Werkzeug Python 3.13 WebSocket Crash.
-    const socket = io({ transports: ["polling"], upgrade: false });
-    
+    const socket = io({ transports: ["websocket", "polling"], upgrade: true });
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     
-    // Initialize Chart
+    // UI Connection Logic
+    socket.on("connect", () => {
+        document.getElementById("status").innerText = "CONNECTED (WAITING...)";
+        document.getElementById("status").style.background = "var(--blue)";
+    });
+
     const ctx = document.getElementById('equityChart').getContext('2d');
     const eqChart = new Chart(ctx, {
         type: 'line',
@@ -353,4 +355,4 @@ def home():
 
 if __name__ == "__main__":
     threading.Thread(target=engine, daemon=True).start()
-    socketio.run(app, host="0.0.0.0", port=PORT, allow_unsafe_werkzeug=True)
+    app.run(host="0.0.0.0", port=PORT)
