@@ -11,7 +11,7 @@ from flask_socketio import SocketIO
 # CONFIG - PAPER KEYS
 # =========================================================
 API_KEY = "PKRY2XRZW4K4TWX4NYSEROPQEK"
-API_SECRET = "8pySz6LGdhjNr8tHfbgMcCgF2cK5 (OMITTED FOR BREVITY - USE YOUR REAL KEY)" 
+API_SECRET = "8pySz6LGdhjNr8tHfbgMcCgF2cK5Qd3afmy4CbwmZznQ"
 
 BASE_URL = "https://paper-api.alpaca.markets"
 DATA_URL = "https://data.alpaca.markets/v2"
@@ -45,7 +45,7 @@ bot = {
 }
 
 trailing_stops = {} 
-activity_log = ["System Initialized... Hybrid UI Restored"]
+activity_log = ["System Initialized... Layout Balanced"]
 
 def log_event(msg):
     timestamp = time.strftime('%H:%M:%S')
@@ -98,8 +98,6 @@ def place_order(symbol, current_price, strength_multiplier):
         r = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
         if r.status_code == 200:
             log_event(f"🔥 BUY: {symbol} (${trade_val:.2f})")
-        else:
-            log_event(f"REJECTED: {r.json().get('message')}")
     except Exception as e:
         log_event(f"ORDER ERROR: {str(e)}")
 
@@ -198,8 +196,8 @@ def home():
 <style>
     :root { --bg: #0b1220; --card: #111827; --border: #1f2937; --text: #e5e7eb; --green: #22c55e; --red: #ef4444; --orange: #f59e0b; --blue: #3b82f6; }
     body { margin:0; background:var(--bg); color:var(--text); font-family:sans-serif; overflow-x:hidden; }
-    .header { display:flex; justify-content:space-between; padding:15px 25px; background:var(--card); border-bottom:1px solid var(--border); }
-    .grid { display:grid; grid-template-columns:320px 1fr 350px; gap:20px; padding:20px; }
+    .header { display:flex; justify-content:space-between; align-items:center; padding:15px 25px; background:var(--card); border-bottom:1px solid var(--border); }
+    .grid { display:grid; grid-template-columns:300px 1fr 350px; gap:20px; padding:20px; height: calc(100vh - 80px); }
     .card { background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:12px; padding:20px; display:flex; flex-direction:column; }
     .big { font-size:32px; font-weight:bold; color:#fff; }
     .muted { color:#9ca3af; font-size:11px; text-transform:uppercase; font-weight:800; letter-spacing:1px; margin-bottom:5px; }
@@ -209,9 +207,8 @@ def home():
     .pill { background:#4b5563; color:#fff; padding:4px 10px; border-radius:20px; font-size:11px; font-weight:900; }
     .status-badge { font-size:9px; padding:2px 6px; border-radius:4px; font-weight:bold; display:inline-block; }
     .countdown-box { text-align:center; padding:40px 20px; border: 2px dashed var(--border); border-radius:10px; margin-top:20px; }
-    /* FIXED CHART CONTAINER: Prevents the white box scrolling issue */
-    .chart-wrap { height: 120px; width: 100%; margin: 15px 0; position: relative; }
-    @media (max-width: 1024px) { .grid { grid-template-columns: 1fr; } }
+    .chart-container { height: 150px; width: 100%; position: relative; margin-top:15px; }
+    @media (max-width: 1024px) { .grid { grid-template-columns: 1fr; height:auto; } .card { margin-bottom:15px; } }
 </style>
 </head>
 <body>
@@ -221,40 +218,46 @@ def home():
 </div>
 
 <div class="grid">
-    <!-- LEFT SIDEBAR: Stats & Watchlist -->
+    <!-- LEFT SIDEBAR -->
     <div class="card">
         <div class="muted">Net Equity</div>
         <div class="big" id="equity">$0.00</div>
         
-        <div class="chart-wrap">
-            <canvas id="equityChart"></canvas>
-        </div>
-
-        <div style="display:flex; justify-content:space-between; font-size:11px; margin-bottom:15px;">
-            <div>WINS: <span id="winrate" style="color:var(--green); font-weight:bold;">0</span></div>
-            <div>PROFIT: <span id="profit" style="color:var(--green); font-weight:bold;">$0.00</span></div>
-        </div>
-
-        <div class="muted">Buying Power</div>
-        <div id="cash" style="font-weight:bold; font-size:16px; margin-bottom:20px;">$0.00</div>
+        <div class="muted" style="margin-top:20px;">Buying Power</div>
+        <div id="cash" style="font-weight:bold; font-size:18px; margin-bottom:20px;">$0.00</div>
         
-        <hr style="border:0; border-top:1px solid var(--border); margin:10px 0;">
+        <hr style="border:0; border-top:1px solid var(--border); margin:20px 0;">
         <div class="muted" style="margin-bottom:10px;">Scanned Active Targets</div>
         <div id="ranked"></div>
     </div>
     
-    <!-- MIDDLE: Main Trading Floor -->
-    <div class="card">
-        <div class="muted" style="margin-bottom:15px;">Live 1:3 Risk/Reward Positions</div>
-        <div id="pos-container">
-            <table>
-                <thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead>
-                <tbody id="pos-table"></tbody>
-            </table>
+    <!-- MIDDLE SECTION -->
+    <div style="display:flex; flex-direction:column; gap:20px;">
+        <!-- Live Positions Card -->
+        <div class="card">
+            <div class="muted" style="margin-bottom:15px;">Live 1:3 Risk/Reward Positions</div>
+            <div id="pos-container">
+                <table>
+                    <thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead>
+                    <tbody id="pos-table"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- New Stats & Chart Card (Under Positions) -->
+        <div class="card">
+            <div class="muted">Session Performance</div>
+            <div style="display:flex; justify-content:space-between; margin-top:10px;">
+                <div style="text-align:center;"><div class="muted">Wins</div><div id="winrate" style="font-size:20px; font-weight:bold; color:var(--green);">0</div></div>
+                <div style="text-align:center;"><div class="muted">Total Profit</div><div id="profit" style="font-size:20px; font-weight:bold; color:var(--green);">$0.00</div></div>
+            </div>
+            <div class="chart-container">
+                <canvas id="equityChart"></canvas>
+            </div>
         </div>
     </div>
 
-    <!-- RIGHT: Execution Log -->
+    <!-- RIGHT SIDEBAR -->
     <div class="card">
         <div class="muted" style="margin-bottom:15px;">Execution Log</div>
         <div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div>
@@ -266,10 +269,11 @@ def home():
     const socket = io({ transports: ["websocket", "polling"], upgrade: true });
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     
+    // Initialize Chart
     const ctx = document.getElementById('equityChart').getContext('2d');
     const eqChart = new Chart(ctx, {
         type: 'line',
-        data: { labels: [], datasets: [{ data: [], borderColor: '#22c55e', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true, backgroundColor: 'rgba(34,197,94,0.05)' }] },
+        data: { labels: [], datasets: [{ data: [], borderColor: '#22c55e', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true, backgroundColor: 'rgba(34,197,94,0.1)' }] },
         options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { display: false } } }
     });
 
@@ -295,14 +299,12 @@ def home():
         if (currentEq > 0) {
             eqChart.data.labels.push("");
             eqChart.data.datasets[0].data.push(currentEq);
-            if(eqChart.data.labels.length > 30) { eqChart.data.labels.shift(); eqChart.data.datasets[0].data.shift(); }
+            if(eqChart.data.labels.length > 50) { eqChart.data.labels.shift(); eqChart.data.datasets[0].data.shift(); }
             eqChart.update();
         }
 
-        const posTable = document.getElementById("pos-table");
         const posContainer = document.getElementById("pos-container");
         if (d.positions.length > 0) {
-            // Restore detailed table
             posContainer.innerHTML = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead><tbody>\${d.positions.map(p => {
                 const entry = parseFloat(p.avg_entry_price);
                 const pl = parseFloat(p.unrealized_intraday_pl);
@@ -316,7 +318,6 @@ def home():
                 </tr>\`;
             }).join("")}</tbody></table>`;
         } else {
-            // Restore "Hunting" card
             posContainer.innerHTML = \`<div class="countdown-box">
                 <div class="muted">No Active Positions</div>
                 <div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div>
@@ -344,3 +345,8 @@ def home():
 </script>
 </body>
 </html>
+"""
+
+if __name__ == "__main__":
+    threading.Thread(target=engine, daemon=True).start()
+    socketio.run(app, host="0.0.0.0", port=PORT, allow_unsafe_werkzeug=True)
