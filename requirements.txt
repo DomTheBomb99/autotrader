@@ -2,3 +2,6 @@ requests
 pandas
 Flask
 Flask-SocketIO
+gunicorn
+gevent
+gevent-websocket
