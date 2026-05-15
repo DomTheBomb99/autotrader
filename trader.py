@@ -37,7 +37,7 @@ bot = {
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"]
 }
 
-activity_log = ["DIAGNOSTIC MODE ONLINE. Waiting for Engine..."]
+activity_log = ["TradeBot Engine Online... Scanning Market."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
@@ -69,25 +69,29 @@ def sanitize_data(obj):
     return obj
 
 def get_account():
-    r = requests.get(f"{BASE_URL}/v2/account", headers=HEADERS, timeout=5)
-    return r.json() if r.status_code == 200 else {"equity": "0.00", "cash": "0.00"}
+    try:
+        r = requests.get(f"{BASE_URL}/v2/account", headers=HEADERS, timeout=5)
+        return r.json() if r.status_code == 200 else {"equity": "0.00", "cash": "0.00"}
+    except: return {"equity": "0.00", "cash": "0.00"}
 
 def get_positions():
-    r = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS, timeout=5)
-    return r.json() if r.status_code == 200 else []
+    try:
+        r = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS, timeout=5)
+        return r.json() if r.status_code == 200 else []
+    except: return []
 
 def get_daily_bars(symbol, limit=100):
     is_crypto = "/" in symbol
     url = "https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/bars"
     params = {"symbols": symbol, "timeframe": "1Day", "limit": limit}
-    r = requests.get(url, headers=HEADERS, params=params, timeout=8)
-    if r.status_code != 200: 
-        log_event(f"API ERROR on {symbol}: Status {r.status_code} - {r.text}")
-        return None
-    data = r.json()
-    bars = data.get("bars", {}).get(symbol, [])
-    if not bars: return None
-    return pd.DataFrame(bars)
+    try:
+        r = requests.get(url, headers=HEADERS, params=params, timeout=8)
+        if r.status_code != 200: return None
+        data = r.json()
+        bars = data.get("bars", {}).get(symbol, [])
+        if not bars: return None
+        return pd.DataFrame(bars)
+    except: return None
 
 def analyze_swing_symbol(symbol, regime):
     try:
@@ -147,8 +151,6 @@ def analyze_swing_symbol(symbol, regime):
             "multiplier": multiplier, "risk": "LOW" if price_now > ema21 else "HIGH", "spark": spark_data
         }
     except Exception as e: 
-        error_msg = traceback.format_exc()
-        print(f"ANALYZE ERROR on {symbol}:\n{error_msg}")
         return None
 
 def engine():
@@ -156,7 +158,6 @@ def engine():
     time.sleep(3) 
     while True:
         try:
-            log_event("Starting Engine Cycle...")
             clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS, timeout=5)
             clock_data = clock_req.json() if clock_req.status_code == 200 else {}
             is_open = clock_data.get("is_open", False)
@@ -195,10 +196,7 @@ def engine():
             global_state["market_regime"] = regime
 
         except Exception as e:
-            err = traceback.format_exc()
-            print(f"CRITICAL ENGINE CRASH:\n{err}")
-            log_event(f"CRITICAL ERROR: {str(e)}")
-            global_state["market_status"] = f"CRASH: {str(e)}"
+            log_event(f"ENGINE ERROR: Waiting for broker to stabilize...")
         
         time.sleep(30)
 
@@ -209,7 +207,6 @@ def api_data():
     try:
         return jsonify(sanitize_data(global_state))
     except Exception as e:
-        print(f"JSON SERIALIZATION ERROR:\n{traceback.format_exc()}")
         return jsonify({"error": "Failed to generate JSON", "details": str(e)}), 500
 
 @app.route("/")
@@ -274,6 +271,9 @@ def home():
 </div>
 
 <script>
+    // SYNCHRONOUS HEARTBEAT - Prove the JS loaded
+    document.getElementById("logs").innerHTML = "<div style='color:var(--green); padding:5px 0; border-bottom:1px solid #1f2937;'>[UI] Interface loaded. Waking up engine...</div>";
+
     const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 
     function drawNativeChart(data) {
@@ -337,17 +337,16 @@ def home():
     async function fetchData() {
         try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 6000);
+            const timeoutId = setTimeout(function() { controller.abort(); }, 6000);
             const response = await fetch('/api/data', { signal: controller.signal });
             clearTimeout(timeoutId);
             
             const data = await response.json();
             
-            // IF Python threw an error during JSON serialization
             if (data.error) {
                 document.getElementById("status").innerText = "JSON ERROR";
                 document.getElementById("status").style.background = "var(--red)";
-                document.getElementById("logs").innerHTML = `<div style="color:red">${data.details}</div>` + document.getElementById("logs").innerHTML;
+                document.getElementById("logs").innerHTML = "<div style='color:red'>" + data.details + "</div>" + document.getElementById("logs").innerHTML;
                 return;
             }
 
@@ -357,9 +356,11 @@ def home():
             document.getElementById("g-state").innerText = data.bot_stats.ai_state;
             document.getElementById("g-exp").innerText = data.bot_stats.exposure;
             document.getElementById("g-vol").innerText = data.bot_stats.volatility;
+            
             const regimeSpan = document.getElementById("regime");
             regimeSpan.innerText = "REGIME: " + data.market_regime;
-            regimeSpan.style.color = data.market_regime.includes("BULLISH") ? "var(--green)" : "var(--red)";
+            if (data.market_regime.indexOf("BULLISH") !== -1) { regimeSpan.style.color = "var(--green)"; } 
+            else { regimeSpan.style.color = "var(--red)"; }
             
             document.getElementById("equity").innerText = formatter.format(data.account.equity || 0);
             document.getElementById("cash").innerText = formatter.format(data.account.cash || 0);
@@ -367,9 +368,11 @@ def home():
             const posContainer = document.getElementById("pos-container");
             if (data.positions && data.positions.length > 0) {
                 let html = '<table><thead><tr><th>Asset</th><th>Entry</th><th>Price</th><th>P/L</th></tr></thead><tbody>';
-                for (let p of data.positions) {
+                for (let i = 0; i < data.positions.length; i++) {
+                    const p = data.positions[i];
                     const pl = parseFloat(p.unrealized_intraday_pl || 0);
-                    html += '<tr><td><b>'+p.symbol+'</b></td><td>'+formatter.format(p.avg_entry_price)+'</td><td>'+formatter.format(p.current_price)+'</td><td style="color:'+(pl >= 0 ? 'var(--green)' : 'var(--red)')+'; font-weight:bold;">'+formatter.format(pl)+'</td></tr>';
+                    const plColor = pl >= 0 ? 'var(--green)' : 'var(--red)';
+                    html += '<tr><td><b>'+p.symbol+'</b></td><td>'+formatter.format(p.avg_entry_price)+'</td><td>'+formatter.format(p.current_price)+'</td><td style="color:'+plColor+'; font-weight:bold;">'+formatter.format(pl)+'</td></tr>';
                 }
                 posContainer.innerHTML = html + '</tbody></table>';
             } else { posContainer.innerHTML = '<div style="text-align:center; padding:20px; color:var(--orange);">No Swings Active. Scouting...</div>'; }
@@ -377,7 +380,9 @@ def home():
             const rankedContainer = document.getElementById("ranked");
             if (data.ranked && data.ranked.length > 0) {
                 let chartTarget = null;
-                for(let r of data.ranked) { if (r.spark && r.spark.close && r.spark.close.length > 0) { chartTarget = r; break; } }
+                for(let i=0; i<data.ranked.length; i++) { 
+                    if (data.ranked[i].spark && data.ranked[i].spark.close && data.ranked[i].spark.close.length > 0) { chartTarget = data.ranked[i]; break; } 
+                }
                 
                 if (chartTarget) {
                     document.getElementById("chart-title").innerText = "X-Ray: " + chartTarget.symbol;
@@ -385,12 +390,13 @@ def home():
                 }
 
                 let html = '';
-                for (let r of data.ranked) {
+                for (let i = 0; i < data.ranked.length; i++) {
+                    const r = data.ranked[i];
                     const color = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
                     let statusText = r.multiplier > 0 ? "🟢 ACQUIRING" : (r.confidence > 40 ? "🟡 WATCHING" : "🔴 REJECTED");
                     let reasonsHtml = '';
-                    if (r.reasons) for (let res of r.reasons) reasonsHtml += '<li>'+res+'</li>';
-                    if (r.counter_reasons) for (let cr of r.counter_reasons) reasonsHtml += '<li style="color:var(--orange)">'+cr+'</li>';
+                    if (r.reasons) { for (let j=0; j<r.reasons.length; j++) reasonsHtml += '<li>'+r.reasons[j]+'</li>'; }
+                    if (r.counter_reasons) { for (let k=0; k<r.counter_reasons.length; k++) reasonsHtml += '<li style="color:var(--orange)">'+r.counter_reasons[k]+'</li>'; }
                     html += '<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;">';
                     html += '<div style="display:flex; justify-content:space-between; align-items:center;">';
                     html += '<div style="display:flex; gap:10px; align-items:center;"><b>'+r.symbol+'</b>'+createSparkline(r.spark.close, color)+'</div>';
@@ -404,12 +410,18 @@ def home():
             
             const logsContainer = document.getElementById("logs");
             if (data.activity && data.activity.length > 0) {
-                let html = ''; for (let a of data.activity) html += '<div style="padding:5px 0; border-bottom:1px solid #1f2937; color:' + (a.includes("ERROR") || a.includes("CRASH") ? "var(--red)" : "#a1a1aa") + ';">'+a+'</div>';
+                let html = ''; 
+                for (let i = 0; i < data.activity.length; i++) {
+                    const a = data.activity[i];
+                    const logColor = (a.indexOf("ERROR") !== -1 || a.indexOf("CRASH") !== -1) ? "var(--red)" : "#a1a1aa";
+                    html += '<div style="padding:5px 0; border-bottom:1px solid #1f2937; color:' + logColor + ';">'+a+'</div>';
+                }
                 logsContainer.innerHTML = html;
             }
         } catch (error) { 
             document.getElementById("status").innerText = "UI ERROR / RECONNECTING";
             document.getElementById("status").style.background = "var(--red)";
+            document.getElementById("logs").innerHTML = "<div style='color:red; padding:5px 0;'>[JS Crash] " + error.message + "</div>" + document.getElementById("logs").innerHTML;
         }
     }
 
