@@ -8,7 +8,7 @@ from datetime import datetime
 from flask import Flask, jsonify
 
 # =========================================================
-# CONFIG - HARDCODED PER USER REQUEST
+# CONFIG - HARDCODED KEYS
 # =========================================================
 API_KEY = "PKFLSLLJIOI2P6BVOCOUOC37MS"
 API_SECRET = "2pNzQVEBscePX1zMBgBpjXDhCdSmmQWyX91Ps4JcDEvg"
@@ -34,7 +34,7 @@ bot = {
     "running": True,
     "watchlist": [], 
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"],
-    "base_trade_usd": 25.00, 
+    "base_trade_usd": 25.00,
     "last_scan_date": "",
     "risk_pct": 5.0,    
     "reward_pct": 15.0, 
@@ -44,8 +44,7 @@ bot = {
     "exposure_pct": 0
 }
 
-trailing_stops = {} 
-activity_log = ["System Initialized... TradeBot Engine Online"]
+activity_log = ["TradeBot Engine Online... Ready to Swing"]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
@@ -53,7 +52,7 @@ global_state = {
     "ranked": [],
     "activity": activity_log[::-1],
     "bot_stats": {"wins": 0, "profit": 0.0, "exposure": "0%", "ai_state": "SWINGING", "volatility": "NORMAL"},
-    "market_status": "BOOTING...",
+    "market_status": "WAITING...",
     "is_open": False,
     "next_event": "",
     "market_regime": "SCANNING..."
@@ -112,22 +111,22 @@ def analyze_swing_symbol(symbol, regime):
         counter_reasons = []
 
         if price_now > sma50:
-            confidence += 20; reasons.append("📈 Above 50-Day Line")
+            confidence += 20; reasons.append("Price > 50 SMA")
         else:
-            confidence -= 20; counter_reasons.append("📉 Below 50-Day Line")
+            confidence -= 20; counter_reasons.append("Price < 50 SMA")
 
         if ema8 > ema21:
-            confidence += 20; reasons.append("🔥 8 EMA > 21 EMA (Uptrend)")
+            confidence += 20; reasons.append("8 EMA > 21 EMA")
         else:
-            confidence -= 15; counter_reasons.append("💤 Weak Momentum")
+            confidence -= 15; counter_reasons.append("EMA Cross Missing")
 
         if price_now > ema8:
-            confidence += 10; reasons.append("🚀 Leading Blue Line")
+            confidence += 10; reasons.append("Momentum is Positive")
         
         if regime == "BULLISH":
-            confidence += 15; reasons.append("🌊 Favorable Market")
+            confidence += 15; reasons.append("Market Regime: Bullish")
         elif regime == "BEARISH":
-            confidence -= 25; counter_reasons.append("🩸 Bearish Headwind")
+            confidence -= 25; counter_reasons.append("Market Regime: Bearish")
 
         confidence = max(0, min(100, confidence))
         multiplier = 1.5 if confidence >= 80 else (1.0 if confidence >= 65 else 0.0)
@@ -169,12 +168,12 @@ def engine():
                     orange_line = float(p_df['21_EMA'].iloc[-1])
                     curr_p = float(p.get("current_price"))
                     if curr_p < orange_line:
-                        log_event(f"🛡️ SWING EXIT: {sym} closed below 21 EMA.")
+                        log_event(f"EXIT: {sym} closed below 21 EMA.")
                         requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS)
 
             active_list = UNIVERSE + bot["crypto_watchlist"]
-            ranked = [analyze_swing_symbol(s, regime) for s in active_list]
-            ranked = [r for r in ranked if r is not None]
+            ranked_results = [analyze_swing_symbol(s, regime) for s in active_list]
+            ranked = [r for r in ranked_results if r is not None]
             ranked.sort(key=lambda x: x["confidence"], reverse=True)
 
             for r in ranked[:2]:
@@ -184,19 +183,19 @@ def engine():
                         qty = round(val / r["price"], 5)
                         payload = {"symbol": r['symbol'], "qty": qty, "side": "buy", "type": "market", "time_in_force": "gtc"}
                         requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
-                        log_event(f"🚀 SWING BUY: {r['symbol']} (${val:.2f})")
+                        log_event(f"BUY: {r['symbol']} (${val:.2f})")
 
             invested = sum(float(p.get("market_value") or 0) for p in pos if p.get('symbol') != "USD")
             exposure = int((invested / equity) * 100) if equity > 0 else 0
 
             global_state = {
                 "account": acc, "positions": pos, "ranked": ranked[:8], "activity": activity_log[::-1],
-                "bot_stats": {"wins": bot["wins"], "profit": bot["total_profit"], "exposure": f"{exposure}%", "ai_state": "SWINGING", "volatility": "NORMAL"},
+                "bot_stats": {"wins": bot["wins"], "profit": bot["total_profit"], "exposure": str(exposure) + "%", "ai_state": "SWINGING", "volatility": "NORMAL"},
                 "market_status": "MARKET OPEN" if is_open else "MARKET CLOSED",
                 "market_regime": regime, "is_open": is_open, "next_event": clock_data.get('next_close', '')
             }
         except Exception as e:
-            log_event(f"ENGINE ERROR: {str(e)}")
+            log_event(f"ERROR: {str(e)}")
         time.sleep(60)
 
 threading.Thread(target=engine, daemon=True).start()
@@ -250,19 +249,19 @@ def home():
         <div class="muted">Net Equity</div><div class="big" id="equity">$0.00</div>
         <div class="muted" style="margin-top:15px;">Buying Power</div><div id="cash" style="font-weight:bold; font-size:18px; margin-bottom:15px;">$0.00</div>
         <hr style="border:0; border-top:1px solid var(--border); margin:20px 0;">
-        <div class="muted" style="margin-bottom:10px;">Daily Swing Targets</div><div id="ranked"></div>
+        <div class="muted" style="margin-bottom:10px;">Minervini Targets</div><div id="ranked"></div>
     </div>
     <div style="display:flex; flex-direction:column; gap:20px;">
-        <div class="card" style="flex-grow:1; overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Live Execution & Risk Metrics</div><div id="pos-container"></div></div>
+        <div class="card" style="flex-grow:1; overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Live Swings</div><div id="pos-container"></div></div>
         <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:15px;">
                 <div><div class="muted">Wins</div><div id="winrate" style="font-size:24px; font-weight:bold; color:var(--green);">0</div></div>
-                <div style="text-align:right;"><div class="muted">Net Profit</div><div id="profit" style="font-size:24px; font-weight:bold; color:var(--green);">$0.00</div></div>
+                <div style="text-align:right;"><div class="muted">Total Profit</div><div id="profit" style="font-size:24px; font-weight:bold; color:var(--green);">$0.00</div></div>
             </div>
             <div style="height:180px; width:100%; position:relative;"><canvas id="equityChart"></canvas></div>
         </div>
     </div>
-    <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Terminal Log</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
+    <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Activity</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
 </div>
 <script>
     const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
@@ -272,11 +271,17 @@ def home():
         data: { labels: [], datasets: [{ data: [], borderColor: '#22c55e', borderWidth: 2, pointRadius: 0, tension: 0, fill: true, backgroundColor: 'rgba(34,197,94,0.05)' }]},
         options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: true }, y: { display: true } }, animation: { duration: 0 } }
     });
-    function toggleAI(symbol) { const p = document.getElementById('ai-' + symbol); p.style.display = p.style.display === 'none' ? 'block' : 'none'; }
+    function toggleAI(symbol) { 
+        const p = document.getElementById('ai-' + symbol); 
+        p.style.display = (p.style.display === 'none' || p.style.display === '') ? 'block' : 'none'; 
+    }
     function createSparkline(dataArray, color) {
         if(!dataArray || dataArray.length === 0) return '';
-        const max = Math.max(...dataArray), min = Math.min(...dataArray), range = (max - min) || 1;
-        const pts = dataArray.map((val, i) => (i/(dataArray.length-1)*60) + ',' + (25 - ((val-min)/range)*25)).join(" ");
+        const max = Math.max.apply(null, dataArray), min = Math.min.apply(null, dataArray), range = (max - min) || 1;
+        let pts = "";
+        for(let i=0; i<dataArray.length; i++) {
+            pts += (i/(dataArray.length-1)*60) + ',' + (25 - ((dataArray[i]-min)/range)*25) + ' ';
+        }
         return '<svg class="sparkline" style="stroke:'+color+'; fill:none; stroke-width:1.5px;"><polyline points="'+pts+'"/></svg>';
     }
     async function fetchBotData() {
@@ -289,7 +294,7 @@ def home():
             document.getElementById("g-exp").innerText = d.bot_stats.exposure;
             document.getElementById("g-vol").innerText = d.bot_stats.volatility;
             document.getElementById("regime").innerText = "REGIME: " + d.market_regime;
-            document.getElementById("regime").style.color = d.market_regime.includes("BULLISH") ? "var(--green)" : "var(--red)";
+            document.getElementById("regime").style.color = d.market_regime.indexOf("BULLISH") !== -1 ? "var(--green)" : "var(--red)";
             let curE = parseFloat(d.account.equity || 0);
             document.getElementById("equity").innerText = f.format(curE);
             document.getElementById("cash").innerText = f.format(d.account.cash);
@@ -304,39 +309,43 @@ def home():
             }
             const posC = document.getElementById("pos-container");
             if (d.positions && d.positions.length > 0) {
-                let html = '<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Trailing Stop</th></tr></thead><tbody>';
-                d.positions.forEach(p => {
-                    const pl = parseFloat(p.unrealized_intraday_pl);
-                    html += '<tr><td><b>'+p.symbol+'</b><br><span style="font-size:10px;">'+p.qty+' shs</span></td><td>'+f.format(p.avg_entry_price)+'</td><td>'+f.format(p.current_price)+'</td><td style="color:'+(pl >= 0 ? 'var(--green)' : 'var(--red)')+'; font-weight:bold;">'+f.format(pl)+'</td><td><span class="status-badge" style="background:rgba(59,130,246,0.1); color:var(--blue);">MINERVINI ORANGE LINE ON</span></td></tr>';
-                });
+                let html = '<table><thead><tr><th>Asset</th><th>Entry</th><th>Price</th><th>P/L</th></tr></thead><tbody>';
+                for(let i=0; i<d.positions.length; i++){
+                    let p = d.positions[i];
+                    let pl = parseFloat(p.unrealized_intraday_pl);
+                    html += '<tr><td><b>'+p.symbol+'</b></td><td>'+f.format(p.avg_entry_price)+'</td><td>'+f.format(p.current_price)+'</td><td style="color:'+(pl >= 0 ? 'var(--green)' : 'var(--red)')+'; font-weight:bold;">'+f.format(pl)+'</td></tr>';
+                }
                 html += '</tbody></table>';
                 posC.innerHTML = html;
             } else {
-                posC.innerHTML = '<div class="countdown-box"><div class="muted">No Active Swings</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div></div>';
+                posC.innerHTML = '<div class="countdown-box"><div class="muted">No Swings Active</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Scanning Daily Trends...</div></div>';
             }
             if (d.ranked) {
                 let html = '';
-                d.ranked.forEach(r => {
+                for(let i=0; i<d.ranked.length; i++){
+                    let r = d.ranked[i];
                     let confC = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
                     html += '<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;">' +
                         '<div style="display:flex; justify-content:space-between; align-items:center;">' +
                         '<div style="display:flex; gap:10px; align-items:center;"><b>'+r.symbol+'</b>'+createSparkline(r.spark, confC)+'</div>' +
                         '<div style="font-weight:bold; color:'+confC+'; font-size:12px;">'+r.confidence+'%</div>' +
                         '</div>' +
-                        '<div style="margin-top:8px;"><span class="ai-btn" onclick="toggleAI(\''+r.symbol+'\')">📊 Breakdown ▾</span></div>' +
+                        '<div style="margin-top:8px;"><span class="ai-btn" onclick="toggleAI(\''+r.symbol+'\')">📊 Breakdown</span></div>' +
                         '<div id="ai-'+r.symbol+'" class="ai-panel">' +
-                        '<div style="color:var(--blue); font-weight:bold; margin-bottom:5px;">Reasons:</div>' +
+                        '<div style="color:var(--blue); font-weight:bold;">Signals:</div>' +
                         '<ul style="padding-left:15px; color:#a1a1aa;">' +
-                        r.reasons.map(res => '<li>'+res+'</li>').join('') +
-                        r.counter_reasons.map(c => '<li style="color:var(--orange)">'+c+'</li>').join('') +
+                        r.reasons.map(function(res){ return '<li>'+res+'</li>'; }).join('') +
+                        r.counter_reasons.map(function(c){ return '<li style="color:var(--orange)">'+c+'</li>'; }).join('') +
                         '</ul></div></div>';
-                });
+                }
                 document.getElementById("ranked").innerHTML = html;
             }
-            document.getElementById("logs").innerHTML = d.activity.map(a => '<div style="padding:5px 0; border-bottom:1px solid #1f2937;">'+a+'</div>').join("");
-        } catch (e) {
-            console.error(e);
-        }
+            let logsHtml = '';
+            for(let i=0; i<d.activity.length; i++){
+                logsHtml += '<div style="padding:5px 0; border-bottom:1px solid #1f2937;">'+d.activity[i]+'</div>';
+            }
+            document.getElementById("logs").innerHTML = logsHtml;
+        } catch (e) { console.log(e); }
     }
     setInterval(fetchBotData, 3000);
     fetchBotData();
