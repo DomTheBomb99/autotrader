@@ -3,7 +3,7 @@ import time
 import threading
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, jsonify
 
 # =========================================================
@@ -43,7 +43,7 @@ bot = {
     "exposure_pct": 0
 }
 
-activity_log = ["TradeBot Engine Online... Ready to Swing"]
+activity_log = ["TradeBot Engine Online... TradingView Candlesticks Enabled"]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
@@ -103,36 +103,44 @@ def analyze_swing_symbol(symbol, regime):
         ema21 = float(df["21_EMA"].iloc[-1])
         sma50 = float(df["50_SMA"].iloc[-1])
         
-        spark_data = df["c"].tail(10).tolist()
+        # Package OHLC data for Candlesticks
+        # Generate clean date strings for TradingView (YYYY-MM-DD)
+        if "t" in df:
+            dates = [str(t)[:10] for t in df["t"].tail(30).tolist()]
+        else:
+            dates = [(datetime.now() - timedelta(days=30-i)).strftime('%Y-%m-%d') for i in range(30)]
+
+        spark_data = {
+            "dates": dates,
+            "open": df["o"].tail(30).tolist(),
+            "high": df["h"].tail(30).tolist(),
+            "low": df["l"].tail(30).tolist(),
+            "close": df["c"].tail(30).tolist(),
+            "ema8": df["8_EMA"].tail(30).tolist(),
+            "ema21": df["21_EMA"].tail(30).tolist()
+        }
         
         confidence = 50 
         reasons = []
         counter_reasons = []
 
         if price_now > sma50:
-            confidence += 20
-            reasons.append("Price > 50 SMA")
+            confidence += 20; reasons.append("Price > 50 SMA")
         else:
-            confidence -= 20
-            counter_reasons.append("Price < 50 SMA")
+            confidence -= 20; counter_reasons.append("Price < 50 SMA")
 
         if ema8 > ema21:
-            confidence += 20
-            reasons.append("8 EMA > 21 EMA")
+            confidence += 20; reasons.append("8 EMA > 21 EMA")
         else:
-            confidence -= 15
-            counter_reasons.append("EMA Cross Missing")
+            confidence -= 15; counter_reasons.append("Waiting for EMA Cross")
 
         if price_now > ema8:
-            confidence += 10
-            reasons.append("Momentum is Positive")
+            confidence += 10; reasons.append("Momentum is Positive")
         
         if regime == "BULLISH":
-            confidence += 15
-            reasons.append("Market Regime: Bullish")
+            confidence += 15; reasons.append("Market Regime: Bullish")
         elif regime == "BEARISH":
-            confidence -= 25
-            counter_reasons.append("Market Regime: Bearish")
+            confidence -= 25; counter_reasons.append("Market Regime: Bearish")
 
         confidence = max(0, min(100, confidence))
         multiplier = 1.5 if confidence >= 80 else (1.0 if confidence >= 65 else 0.0)
@@ -182,6 +190,9 @@ def engine():
             ranked = [r for r in ranked_results if r is not None]
             ranked.sort(key=lambda x: x["confidence"], reverse=True)
 
+            if len(ranked) > 0:
+                log_event(f"📡 Radar Swept. Top Watch: {ranked[0]['symbol']} ({ranked[0]['confidence']}%)")
+
             for r in ranked[:2]:
                 if r["multiplier"] > 0 and not any(p.get('symbol') == r['symbol'] for p in pos):
                     if cash >= (bot["base_trade_usd"] * r["multiplier"]):
@@ -218,6 +229,7 @@ def home():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TradeBot Terminal</title>
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <style>
     :root { --bg: #0b1220; --card: #111827; --border: #1f2937; --text: #e5e7eb; --green: #22c55e; --yellow: #eab308; --red: #ef4444; --orange: #f59e0b; --blue: #3b82f6; }
     body { margin:0; background:var(--bg); color:var(--text); font-family:sans-serif; overflow-x:hidden; }
@@ -231,9 +243,9 @@ def home():
     th { color:#9ca3af; padding-bottom:12px; border-bottom:1px solid var(--border); font-size:11px; text-transform:uppercase; }
     td { padding:12px 0; border-bottom:1px solid var(--border); }
     .pill { background:#4b5563; color:#fff; padding:4px 10px; border-radius:20px; font-size:11px; font-weight:900; }
-    .status-badge { font-size:9px; padding:2px 6px; border-radius:4px; font-weight:bold; display:inline-block; }
     .ai-btn { background:rgba(59,130,246,0.1); border:1px solid rgba(59,130,246,0.3); color:var(--blue); font-size:10px; padding:3px 6px; border-radius:4px; cursor:pointer; font-weight:bold; transition: 0.2s; }
     .ai-panel { display:none; background:rgba(0,0,0,0.3); border-left: 2px solid var(--blue); padding:10px; margin-top:8px; border-radius:0 6px 6px 0; font-size:11px; }
+    .sparkline { width: 60px; height: 25px; }
     @media (max-width: 1024px) { .grid { grid-template-columns: 1fr; height:auto; } .card { margin-bottom:15px; } }
 </style>
 </head>
@@ -253,16 +265,19 @@ def home():
         <div class="muted">Net Equity</div><div class="big" id="equity">$0.00</div>
         <div class="muted" style="margin-top:15px;">Buying Power</div><div id="cash" style="font-weight:bold; font-size:18px; margin-bottom:15px;">$0.00</div>
         <hr style="border:0; border-top:1px solid var(--border); margin:20px 0;">
-        <div class="muted" style="margin-bottom:10px;">Minervini Targets</div><div id="ranked"></div>
+        <div class="muted" style="margin-bottom:10px;">Active Radar (Top 8)</div><div id="ranked"></div>
     </div>
     <div style="display:flex; flex-direction:column; gap:20px;">
         <div class="card" style="flex-grow:1; overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Live Swings</div><div id="pos-container"></div></div>
         <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:15px;">
-                <div><div class="muted">Wins</div><div id="winrate" style="font-size:24px; font-weight:bold; color:var(--green);">0</div></div>
-                <div style="text-align:right;"><div class="muted">Total Profit</div><div id="profit" style="font-size:24px; font-weight:bold; color:var(--green);">$0.00</div></div>
+                <div><div class="muted" id="chart-title">AI Strategy X-Ray</div><div style="font-size:12px; color:#a1a1aa;">Tracking Top Target</div></div>
+                <div style="display:flex; gap:10px; font-size:10px; font-weight:bold;">
+                    <span style="color:var(--blue);">8 EMA</span>
+                    <span style="color:var(--orange);">21 EMA</span>
+                </div>
             </div>
-            <div style="height:180px; width:100%; position:relative; display:flex; align-items:center; justify-content:center; border:1px dashed #1f2937; border-radius:8px; color:#6b7280; font-size:12px;">Chart Offline for Stability</div>
+            <div id="xrayChart" style="height:180px; width:100%; position:relative;"></div>
         </div>
     </div>
     <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Activity</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
@@ -271,13 +286,42 @@ def home():
 <script>
     const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     
+    // Initialize TradingView Chart
+    const chartOptions = {
+        layout: { textColor: '#a1a1aa', background: { type: 'solid', color: 'transparent' } },
+        grid: { vertLines: { color: 'rgba(31, 41, 55, 0.5)' }, horzLines: { color: 'rgba(31, 41, 55, 0.5)' } },
+        timeScale: { timeVisible: false, borderColor: '#1f2937' },
+        rightPriceScale: { borderColor: '#1f2937' }
+    };
+    
+    const chart = LightweightCharts.createChart(document.getElementById('xrayChart'), chartOptions);
+    
+    // Create Series: Candlesticks + 2 Lines
+    const candleSeries = chart.addCandlestickSeries({
+        upColor: '#22c55e', downColor: '#ef4444', borderVisible: false,
+        wickUpColor: '#22c55e', wickDownColor: '#ef4444'
+    });
+    const ema8Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 2, crosshairMarkerVisible: false });
+    const ema21Series = chart.addLineSeries({ color: '#f59e0b', lineWidth: 2, crosshairMarkerVisible: false });
+
+    // Handle Resize
+    window.addEventListener('resize', () => {
+        chart.resize(document.getElementById('xrayChart').clientWidth, 180);
+    });
+
     function togglePanel(id) {
         const panel = document.getElementById(id);
-        if (panel.style.display === 'none' || panel.style.display === '') {
-            panel.style.display = 'block';
-        } else {
-            panel.style.display = 'none';
+        panel.style.display = (panel.style.display === 'none' || panel.style.display === '') ? 'block' : 'none';
+    }
+
+    function createSparkline(dataArray, color) {
+        if(!dataArray || dataArray.length === 0) return '';
+        const max = Math.max.apply(null, dataArray), min = Math.min.apply(null, dataArray), range = (max - min) || 1;
+        let pts = "";
+        for(let i=0; i<dataArray.length; i++) {
+            pts += (i/(dataArray.length-1)*60) + ',' + (25 - ((dataArray[i]-min)/range)*25) + ' ';
         }
+        return '<svg class="sparkline" style="stroke:'+color+'; fill:none; stroke-width:1.5px;"><polyline points="'+pts+'"/></svg>';
     }
 
     async function fetchData() {
@@ -287,7 +331,6 @@ def home():
             
             document.getElementById("status").innerText = "LIVE SYNC";
             document.getElementById("status").style.background = "var(--green)";
-            document.getElementById("mkt").innerText = data.market_status;
             
             document.getElementById("g-state").innerText = data.bot_stats.ai_state;
             document.getElementById("g-exp").innerText = data.bot_stats.exposure;
@@ -300,10 +343,8 @@ def home():
             const eq = parseFloat(data.account.equity || 0);
             document.getElementById("equity").innerText = formatter.format(eq);
             document.getElementById("cash").innerText = formatter.format(data.account.cash);
-            document.getElementById("winrate").innerText = data.bot_stats.wins;
-            document.getElementById("profit").innerText = formatter.format(data.bot_stats.profit);
             
-            // Positions
+            // Live Swings
             const posContainer = document.getElementById("pos-container");
             if (data.positions && data.positions.length > 0) {
                 let html = '<table><thead><tr><th>Asset</th><th>Entry</th><th>Price</th><th>P/L</th></tr></thead><tbody>';
@@ -315,39 +356,66 @@ def home():
                 html += '</tbody></table>';
                 posContainer.innerHTML = html;
             } else {
-                posContainer.innerHTML = '<div style="text-align:center; padding:20px; color:var(--orange);">No Swings Active. Scanning...</div>';
+                posContainer.innerHTML = '<div style="text-align:center; padding:20px; color:var(--orange);">No Swings Active. Scouting for Setups...</div>';
             }
             
-            // Targets
+            // Active Radar & TradingView Update
             const rankedContainer = document.getElementById("ranked");
             if (data.ranked && data.ranked.length > 0) {
+                
+                // --- UPDATE TRADINGVIEW CHART WITH OHLC DATA ---
+                const topTarget = data.ranked[0];
+                document.getElementById("chart-title").innerText = "X-Ray: " + topTarget.symbol;
+                
+                if(topTarget.spark && topTarget.spark.dates.length > 0) {
+                    // Format data for Lightweight Charts
+                    const ohlcData = [];
+                    const ema8Data = [];
+                    const ema21Data = [];
+                    
+                    for(let i=0; i<topTarget.spark.dates.length; i++) {
+                        const dateStr = topTarget.spark.dates[i];
+                        ohlcData.push({ time: dateStr, open: topTarget.spark.open[i], high: topTarget.spark.high[i], low: topTarget.spark.low[i], close: topTarget.spark.close[i] });
+                        ema8Data.push({ time: dateStr, value: topTarget.spark.ema8[i] });
+                        ema21Data.push({ time: dateStr, value: topTarget.spark.ema21[i] });
+                    }
+                    
+                    // Inject data into the 3 series
+                    candleSeries.setData(ohlcData);
+                    ema8Series.setData(ema8Data);
+                    ema21Series.setData(ema21Data);
+                    chart.timeScale().fitContent();
+                }
+
+                // Render Sidebar
                 let html = '';
                 for (let r of data.ranked) {
                     const color = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
+                    let statusText = r.multiplier > 0 ? "🟢 ACQUIRING" : (r.confidence > 40 ? "🟡 WATCHING EMA" : "🔴 REJECTED");
+
                     let reasonsHtml = '';
-                    if (r.reasons) {
-                        for (let res of r.reasons) reasonsHtml += '<li>' + res + '</li>';
-                    }
-                    if (r.counter_reasons) {
-                        for (let cr of r.counter_reasons) reasonsHtml += '<li style="color:var(--orange)">' + cr + '</li>';
-                    }
+                    if (r.reasons) for (let res of r.reasons) reasonsHtml += '<li>' + res + '</li>';
+                    if (r.counter_reasons) for (let cr of r.counter_reasons) reasonsHtml += '<li style="color:var(--orange)">' + cr + '</li>';
                     
                     html += '<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;">';
-                    html += '<div style="display:flex; justify-content:space-between;"><b>' + r.symbol + '</b><b style="color:' + color + '">' + r.confidence + '%</b></div>';
-                    html += '<div style="margin-top:5px;"><span class="ai-btn" onclick="togglePanel(\\'ai-' + r.symbol + '\\')">Breakdown</span></div>';
+                    html += '<div style="display:flex; justify-content:space-between; align-items:center;">';
+                    html += '<div style="display:flex; gap:10px; align-items:center;"><b>' + r.symbol + '</b>' + createSparkline(r.spark.close, color) + '</div>';
+                    html += '<div style="text-align:right;"><div style="font-weight:bold; color:' + color + ';">' + r.confidence + '% Conf</div><div style="font-size:9px; color:#a1a1aa; margin-top:3px;"><span style="color:'+color+'">' + statusText + '</span></div></div>';
+                    html += '</div>';
+                    html += '<div style="margin-top:8px;"><span class="ai-btn" onclick="togglePanel(\\'ai-' + r.symbol + '\\')">Breakdown ▾</span></div>';
                     html += '<div id="ai-' + r.symbol + '" class="ai-panel"><ul>' + reasonsHtml + '</ul></div>';
                     html += '</div>';
                 }
                 rankedContainer.innerHTML = html;
+            } else {
+                rankedContainer.innerHTML = '<div style="padding:15px; text-align:center; color:var(--orange); border: 1px dashed var(--border); border-radius: 8px;">📡 Sweeping Universe...</div>';
             }
             
             // Logs
             const logsContainer = document.getElementById("logs");
             if (data.activity && data.activity.length > 0) {
                 let html = '';
-                for (let a of data.activity) {
-                    html += '<div style="padding:5px 0; border-bottom:1px solid #1f2937;">' + a + '</div>';
-                }
+                for (let a of data.activity) html += '<div style="padding:5px 0; border-bottom:1px solid #1f2937;">' + a + '</div>';
                 logsContainer.innerHTML = html;
             }
             
@@ -361,7 +429,3 @@ def home():
 </script>
 </body>
 </html>
-"""
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, threaded=True)
