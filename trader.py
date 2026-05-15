@@ -37,7 +37,7 @@ bot = {
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"]
 }
 
-activity_log = ["TradeBot Engine Online... Establishing secure connection."]
+activity_log = ["TradeBot Engine v6.0 Online... Bypassing Cache."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
@@ -80,32 +80,40 @@ def get_positions():
         return r.json() if r.status_code == 200 else []
     except: return []
 
-# CRITICAL FIX: Explicitly stating feed=iex for free tier stock data
+# CRITICAL FIX: Explicit start dates and feed routing to bypass Alpaca blocks
 def get_daily_bars(symbol, limit=100):
     is_crypto = "/" in symbol
     url = "https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/bars"
-    params = {"symbols": symbol, "timeframe": "1Day", "limit": limit}
     
-    if not is_crypto:
-        params["feed"] = "iex" # <--- The missing key that blocked the data
+    start_date = (datetime.utcnow() - timedelta(days=150)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    params = {"symbols": symbol, "timeframe": "1Day", "limit": limit, "start": start_date}
+    
+    if not is_crypto: 
+        params["feed"] = "iex"
         
     try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=8)
-        if r.status_code != 200: return None
+        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        if r.status_code != 200: 
+            return None, f"Code {r.status_code}: {r.text}"
+        
         data = r.json()
         bars = data.get("bars", {}).get(symbol, [])
-        if not bars: return None
-        return pd.DataFrame(bars)
-    except: return None
+        if not bars: 
+            return None, "Alpaca returned empty data array."
+        
+        return pd.DataFrame(bars), "OK"
+    except Exception as e: 
+        return None, str(e)
 
 def analyze_swing_symbol(symbol, regime):
     try:
-        df = get_daily_bars(symbol, 100)
+        df, error_msg = get_daily_bars(symbol, 100)
         
         if df is None or len(df) < 20: 
+            # Output the EXACT error from Alpaca so we can see it
             return {
                 "symbol": symbol, "confidence": 0, "reasons": [], 
-                "counter_reasons": ["Missing or Insufficient Data from Broker"], 
+                "counter_reasons": [f"API BLOCK: {error_msg}"], 
                 "price": 0.0, "multiplier": 0.0, "risk": "HIGH", 
                 "spark": {"dates": [], "open": [], "high": [], "low": [], "close": [], "ema8": [], "ema21": []}
             }
@@ -156,7 +164,10 @@ def analyze_swing_symbol(symbol, regime):
             "multiplier": multiplier, "risk": "LOW" if price_now > ema21 else "HIGH", "spark": spark_data
         }
     except Exception as e: 
-        return None
+        return {
+            "symbol": symbol, "confidence": 0, "reasons": [], "counter_reasons": [f"Crash: {str(e)}"], 
+            "price": 0.0, "multiplier": 0.0, "risk": "HIGH", "spark": {}
+        }
 
 def engine():
     global global_state
@@ -172,8 +183,8 @@ def engine():
             cash = float(acc.get("cash") or 0)
             equity = float(acc.get("equity") or 0)
             
-            spy_df = get_daily_bars("SPY", 20)
-            regime = "ERROR"
+            spy_df, spy_err = get_daily_bars("SPY", 20)
+            regime = "API ERROR"
             if spy_df is not None and len(spy_df) > 10:
                 spy_c = float(spy_df['c'].iloc[-1])
                 spy_ema = float(spy_df['c'].ewm(span=10, adjust=False).mean().iloc[-1])
@@ -210,7 +221,7 @@ def engine():
             global_state["market_regime"] = regime
 
         except Exception as e:
-            log_event(f"ENGINE ERROR: Waiting for broker to stabilize...")
+            log_event(f"ENGINE ERROR: {str(e)}")
         
         time.sleep(60)
 
@@ -258,7 +269,7 @@ def home():
     <div><span id="regime" style="color:var(--orange);">REGIME: SCANNING</span></div>
 </div>
 <div class="header">
-    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
+    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v6.0</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
     <div class="pill" id="status" style="background:var(--orange)">CONNECTING...</div>
 </div>
 <div class="grid">
@@ -281,7 +292,7 @@ def home():
             <div style="height:180px; width:100%; position:relative;"><canvas id="xrayCanvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas></div>
         </div>
     </div>
-    <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Activity Log</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
+    <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Diagnostic Log</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
 </div>
 
 <script>
@@ -347,15 +358,12 @@ def home():
 
     async function fetchData() {
         try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(function() { controller.abort(); }, 6000);
-            const response = await fetch('/api/data', { signal: controller.signal });
-            clearTimeout(timeoutId);
-            
+            // CACHE BUSTER: Forces the browser to ask Python for brand new data every time
+            const response = await fetch('/api/data?timestamp=' + new Date().getTime());
             const data = await response.json();
             
             if (data.error) {
-                document.getElementById("status").innerText = "JSON ERROR";
+                document.getElementById("status").innerText = "API ERROR";
                 document.getElementById("status").style.background = "var(--red)";
                 document.getElementById("logs").innerHTML = "<div style='color:red'>" + data.details + "</div>" + document.getElementById("logs").innerHTML;
                 return;
@@ -405,6 +413,12 @@ def home():
                     const r = data.ranked[i];
                     const color = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
                     let statusText = r.multiplier > 0 ? "🟢 ACQUIRING" : (r.confidence > 40 ? "🟡 WATCHING" : "🔴 REJECTED");
+                    
+                    // Highlight the specific API Error if there is one
+                    if(r.counter_reasons && r.counter_reasons[0] && r.counter_reasons[0].indexOf("API BLOCK") !== -1) {
+                        statusText = "🟠 API ERROR";
+                    }
+
                     let reasonsHtml = '';
                     if (r.reasons) { for (let j=0; j<r.reasons.length; j++) reasonsHtml += '<li>'+r.reasons[j]+'</li>'; }
                     if (r.counter_reasons) { for (let k=0; k<r.counter_reasons.length; k++) reasonsHtml += '<li style="color:var(--orange)">'+r.counter_reasons[k]+'</li>'; }
