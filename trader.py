@@ -39,13 +39,13 @@ bot = {
     "risk_pct": 2.0,    
     "reward_pct": 6.0,
     "wins": 0,
-    "total_profit": 0.0
+    "total_profit": 0.0,
+    "kill_switch_active": False # New Risk Management feature
 }
 
 trailing_stops = {} 
-activity_log = ["System Initialized... API Mode Online"]
+activity_log = ["System Initialized... Deep Think AI Online"]
 
-# The Global Vault for the Website to fetch
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
     "positions": [],
@@ -54,7 +54,8 @@ global_state = {
     "bot_stats": {"wins": 0, "profit": 0.0},
     "market_status": "BOOTING ENGINE...",
     "is_open": False,
-    "next_event": ""
+    "next_event": "",
+    "market_regime": "SCANNING..."
 }
 
 def log_event(msg):
@@ -62,7 +63,7 @@ def log_event(msg):
     full_msg = f"[{timestamp}] {msg}"
     print(full_msg)
     activity_log.append(full_msg)
-    if len(activity_log) > 25:
+    if len(activity_log) > 30:
         activity_log.pop(0)
 
 def run_daily_scanner():
@@ -83,7 +84,7 @@ def run_daily_scanner():
             except: continue
         movers.sort(key=lambda x: x["change"], reverse=True)
         bot["watchlist"] = [m["symbol"] for m in movers[:5]]
-        log_event(f"🎯 NEW TARGETS LOCKED")
+        log_event(f"🎯 DAILY SCAN COMPLETE")
         return True
     except: return False
 
@@ -99,22 +100,23 @@ def get_positions():
         return r.json() if r.status_code == 200 else []
     except: return []
 
-def place_order(symbol, current_price, strength_multiplier):
+def place_order(symbol, current_price, multiplier):
+    if bot["kill_switch_active"]: return
     try:
-        trade_val = bot["base_trade_usd"] * strength_multiplier
+        trade_val = bot["base_trade_usd"] * multiplier
         qty = round(trade_val / current_price, 5)
         tif = "gtc" if "/" in symbol else "day"
         payload = {"symbol": symbol, "qty": qty, "side": "buy", "type": "market", "time_in_force": tif}
         r = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
         if r.status_code == 200:
-            log_event(f"🔥 BUY: {symbol} (${trade_val:.2f})")
+            log_event(f"🔥 EXECUTED: {symbol} (${trade_val:.2f} | {multiplier}x Size)")
     except Exception as e:
         log_event(f"ORDER ERROR: {str(e)}")
 
-def get_bars(symbol):
+def get_bars(symbol, limit=60): # Increased to 60 for MTF analysis
     is_crypto = "/" in symbol
     url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/{symbol}/bars"
-    params = {"symbols": symbol, "timeframe": "1Min", "limit": 31} if is_crypto else {"timeframe": "1Min", "limit": 31, "feed": "iex"}
+    params = {"symbols": symbol, "timeframe": "1Min", "limit": limit} if is_crypto else {"timeframe": "1Min", "limit": limit, "feed": "iex"}
     try:
         r = requests.get(url, headers=HEADERS, params=params)
         if r.status_code != 200: return None
@@ -123,24 +125,85 @@ def get_bars(symbol):
         return pd.DataFrame(bars) if len(bars) > 0 else None
     except: return None
 
-def score_symbol(symbol):
+# =========================================================
+# AI BRAIN: Confidence Scoring & Multi-Timeframe Analysis
+# =========================================================
+def analyze_symbol(symbol, regime):
     try:
-        df = get_bars(symbol)
-        if df is None or len(df) < 20: return {"symbol": symbol, "score": 0.0, "price": 0.0, "vol_spike": False}
-        current_price = float(df["c"].iloc[-1])
-        past_price = float(df["c"].iloc[0])
+        df = get_bars(symbol, 60)
+        if df is None or len(df) < 30: 
+            return {"symbol": symbol, "score": 0.0, "confidence": 0, "reasons": ["Not enough data"], "price": 0.0, "multiplier": 0}
+        
+        price_now = float(df["c"].iloc[-1])
+        price_15m = float(df["c"].iloc[-15])
+        price_60m = float(df["c"].iloc[0])
+        
+        trend_1h = ((price_now - price_60m) / price_60m) * 100
+        trend_15m = ((price_now - price_15m) / price_15m) * 100
+        
         avg_vol = df["v"].iloc[:-1].mean()
         curr_vol = df["v"].iloc[-1]
         vol_spike = bool(curr_vol > (avg_vol * 1.5))
-        pct_change = ((current_price - past_price) / past_price) * 100
-        return {"symbol": symbol, "score": float(pct_change), "price": float(current_price), "vol_spike": vol_spike}
+        
+        confidence = 0
+        reasons = []
+
+        # 1. MTF Trend Check
+        if trend_1h > 0.5:
+            confidence += 30
+            reasons.append("📈 1H Trend: Strong Bullish")
+        elif trend_1h > 0:
+            confidence += 10
+            reasons.append("↗️ 1H Trend: Mild Bullish")
+        else:
+            reasons.append("📉 1H Trend: Bearish (Headwind)")
+
+        # 2. Short-Term Momentum
+        if trend_15m > 0.15:
+            confidence += 40
+            reasons.append("🚀 15m Momentum: Breakout Detected")
+        elif trend_15m > 0:
+            confidence += 15
+            reasons.append("⏱️ 15m Momentum: Building")
+        else:
+            reasons.append("⚠️ 15m Momentum: Reversing")
+
+        # 3. Volume Quality Filter
+        if vol_spike:
+            confidence += 20
+            reasons.append("🔥 Volume: High Accumulation (Institutions Buying)")
+        else:
+            reasons.append("💤 Volume: Standard / Low")
+
+        # 4. Market Regime Alignment
+        if regime == "RISK ON (BULLISH)":
+            confidence += 10
+            reasons.append("🌊 Market Regime: Favorable Tailwind")
+        elif regime == "RISK OFF (BEARISH)":
+            confidence -= 20
+            reasons.append("🩸 Market Regime: Bearish (High Risk)")
+
+        # Dynamic Position Sizing based on Confidence
+        if confidence >= 80:
+            multiplier = 1.5
+        elif confidence >= 60:
+            multiplier = 1.0
+        else:
+            multiplier = 0.0 # NO TRADE STATE
+
+        return {"symbol": symbol, "score": trend_15m, "confidence": confidence, "reasons": reasons, "price": price_now, "multiplier": multiplier}
     except:
-        return {"symbol": symbol, "score": 0.0, "price": 0.0, "vol_spike": False}
+        return {"symbol": symbol, "score": 0.0, "confidence": 0, "reasons": ["API Error"], "price": 0.0, "multiplier": 0}
 
 def engine():
     global global_state
     while True:
         try:
+            # 1. Check Kill Switch (Max Daily Loss)
+            if bot["total_profit"] < -10.00 and not bot["kill_switch_active"]:
+                bot["kill_switch_active"] = True
+                log_event("🛑 KILL SWITCH ACTIVATED: Max drawdown reached.")
+
             clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS)
             clock_data = clock_req.json() if clock_req.status_code == 200 else {}
             is_open = clock_data.get("is_open", False)
@@ -153,6 +216,17 @@ def engine():
             pos = get_positions()
             cash = float(acc.get("cash") or 0)
 
+            # =========================================================
+            # MARKET REGIME DETECTION (Using SPY as baseline)
+            # =========================================================
+            spy_df = get_bars("SPY", 15)
+            market_regime = "CHOP / RANGING"
+            if spy_df is not None and len(spy_df) > 10:
+                spy_change = ((spy_df["c"].iloc[-1] - spy_df["c"].iloc[0]) / spy_df["c"].iloc[0]) * 100
+                if spy_change > 0.05: market_regime = "RISK ON (BULLISH)"
+                elif spy_change < -0.05: market_regime = "RISK OFF (BEARISH)"
+
+            # Manage existing positions (Trailing Stops)
             for p in pos:
                 sym = p.get('symbol')
                 if not sym: continue
@@ -161,7 +235,7 @@ def engine():
                 if sym not in trailing_stops or curr_plpc > trailing_stops[sym]:
                     trailing_stops[sym] = curr_plpc
                 if (trailing_stops[sym] - curr_plpc) >= bot["risk_pct"]:
-                    log_event(f"🛡️ TRAILING STOP: {sym} ({curr_plpc:.2f}%)")
+                    log_event(f"🛡️ TRAIL STOP: {sym} ({curr_plpc:.2f}%)")
                     requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS)
                     if sym in trailing_stops: del trailing_stops[sym]
                 elif curr_plpc >= bot["reward_pct"]:
@@ -171,27 +245,29 @@ def engine():
                     requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS)
                     if sym in trailing_stops: del trailing_stops[sym]
 
+            # Analyze Targets with AI Brain
             active_list = bot["watchlist"] + bot["crypto_watchlist"]
             if len(bot["watchlist"]) == 0:
                 active_list = ["TSLA", "NVDA", "AMD", "COIN", "MARA"] + bot["crypto_watchlist"]
-            ranked = [score_symbol(s) for s in active_list]
+            
+            ranked = [analyze_symbol(s, market_regime) for s in active_list]
             ranked = [r for r in ranked if r is not None]
-            ranked.sort(key=lambda x: x["score"], reverse=True)
+            ranked.sort(key=lambda x: x["confidence"], reverse=True) # Sort by AI Confidence now!
 
             for r in ranked[:2]:
-                if r["score"] > 0.15 and r["vol_spike"]:
-                    if not any(p.get('symbol') == r['symbol'] for p in pos) and cash >= bot["base_trade_usd"]:
-                        multiplier = 1.0 if r["score"] < 0.30 else 1.5
-                        place_order(r["symbol"], r["price"], multiplier)
+                # Entry requires High Confidence AND No Active Kill Switch
+                if r["multiplier"] > 0 and not bot["kill_switch_active"]:
+                    if not any(p.get('symbol') == r['symbol'] for p in pos) and cash >= (bot["base_trade_usd"] * r["multiplier"]):
+                        place_order(r["symbol"], r["price"], r["multiplier"])
 
-            # Thread-safe snapshot update
             global_state = {
                 "account": acc,
                 "positions": pos,
-                "ranked": ranked[:10],
+                "ranked": ranked[:10], # Send top 10 analyzed targets to UI
                 "activity": activity_log[::-1],
                 "bot_stats": {"wins": bot["wins"], "profit": bot["total_profit"]},
                 "market_status": "MARKET OPEN" if is_open else "MARKET CLOSED",
+                "market_regime": market_regime,
                 "is_open": is_open,
                 "next_event": clock_data.get('next_close', '') if is_open else clock_data.get('next_open', '')
             }
@@ -202,7 +278,6 @@ def engine():
 
 threading.Thread(target=engine, daemon=True).start()
 
-# API Route to serve data
 @app.route("/api/data")
 def api_data():
     return jsonify(global_state)
@@ -232,13 +307,22 @@ def home():
     .status-badge { font-size:9px; padding:2px 6px; border-radius:4px; font-weight:bold; display:inline-block; }
     .countdown-box { text-align:center; padding:40px 20px; border: 2px dashed var(--border); border-radius:10px; margin-top:20px; }
     .chart-container { height: 150px; width: 100%; position: relative; margin-top:15px; }
+    
+    /* NEW: AI Breakdown Toggle Button Styles */
+    .ai-btn { background:rgba(59,130,246,0.1); border:1px solid rgba(59,130,246,0.3); color:var(--blue); font-size:10px; padding:3px 6px; border-radius:4px; cursor:pointer; font-weight:bold; transition: 0.2s; }
+    .ai-btn:hover { background:rgba(59,130,246,0.3); }
+    .ai-panel { display:none; background:rgba(0,0,0,0.3); border-left: 2px solid var(--blue); padding:10px; margin-top:8px; border-radius:0 6px 6px 0; font-size:11px; }
+    
     @media (max-width: 1024px) { .grid { grid-template-columns: 1fr; height:auto; } .card { margin-bottom:15px; } }
 </style>
 </head>
 <body>
 <div class="header">
     <div><span style="font-weight:900; font-size:18px;">QUANTUM<span style="color:var(--green)">PRO</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
-    <div class="pill" id="status" style="background:var(--orange)">FETCHING DATA...</div>
+    <div style="display:flex; gap:10px; align-items:center;">
+        <span id="regime" style="font-size:10px; font-weight:bold; color:var(--orange);">REGIME: SCANNING</span>
+        <div class="pill" id="status" style="background:var(--orange)">FETCHING DATA...</div>
+    </div>
 </div>
 
 <div class="grid">
@@ -255,12 +339,7 @@ def home():
     <div style="display:flex; flex-direction:column; gap:20px;">
         <div class="card">
             <div class="muted" style="margin-bottom:15px;">Live 1:3 Risk/Reward Positions</div>
-            <div id="pos-container">
-                <table>
-                    <thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Stop</th><th>Target</th></tr></thead>
-                    <tbody id="pos-table"></tbody>
-                </table>
-            </div>
+            <div id="pos-container"></div>
         </div>
         <div class="card">
             <div class="muted">Session Performance</div>
@@ -288,12 +367,9 @@ def home():
         options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { display: false } }, animation: { duration: 0 } }
     });
 
-    function updateCountdown(endTime) {
-        if (!endTime) return "...";
-        const diff = new Date(endTime) - new Date();
-        if (diff <= 0) return "Closing Session...";
-        const h = Math.floor(diff / 3600000), m = Math.floor((diff % 3600000) / 60000), s = Math.floor((diff % 60000) / 1000);
-        return `${h}h ${m}m ${s}s`;
+    function toggleAI(symbol) {
+        const panel = document.getElementById('ai-' + symbol);
+        panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
     }
 
     async function fetchBotData() {
@@ -304,6 +380,11 @@ def home():
             document.getElementById("status").innerText = "LIVE SYNC";
             document.getElementById("status").style.background = "var(--green)";
             document.getElementById("mkt").innerText = d.market_status;
+            
+            // Render Market Regime
+            const regBadge = document.getElementById("regime");
+            regBadge.innerText = "REGIME: " + d.market_regime;
+            regBadge.style.color = d.market_regime.includes("BULLISH") ? "var(--green)" : (d.market_regime.includes("BEARISH") ? "var(--red)" : "var(--orange)");
             
             const currentEq = parseFloat(d.account.equity || 0);
             document.getElementById("equity").innerText = f.format(currentEq);
@@ -336,22 +417,31 @@ def home():
                 posContainer.innerHTML = `<div class="countdown-box">
                     <div class="muted">No Active Positions</div>
                     <div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div>
-                    <hr style="border:0; border-top:1px solid var(--border); margin:15px 0;">
-                    <div class="muted">${d.is_open ? 'Session Closes In:' : 'Next Session Starts In:'}</div>
-                    <div style="font-size:24px; font-weight:bold; color:#fff;">${updateCountdown(d.next_event)}</div>
                 </div>`;
             }
 
             if (d.ranked) {
                 document.getElementById("ranked").innerHTML = d.ranked.map(r => {
-                    const threshold = 0.15;
-                    let status = r.score >= threshold ? "⚡ TRIGGERED" : (r.score > 0 ? `📈 Est. ${Math.round(((threshold-r.score)/r.score)*15)}m` : "📉 Awaiting Rev");
-                    let color = r.score >= threshold ? "var(--green)" : (r.score > 0 ? "var(--orange)" : "var(--red)");
+                    let confColor = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 60 ? 'var(--blue)' : 'var(--red)');
+                    let actionText = r.multiplier > 1 ? 'AGGRESSIVE BUY' : (r.multiplier > 0 ? 'STANDARD BUY' : 'NO TRADE STATE');
+                    
                     return `<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:8px;">
-                        <div style="display:flex; justify-content:space-between; margin-bottom:4px;"><b>${r.symbol}</b> <span>${r.score.toFixed(2)}%</span></div>
-                        <div style="display:flex; gap:5px;">
-                            <span class="status-badge" style="background:rgba(255,255,255,0.05); color:${color};">${status}</span>
-                            ${r.vol_spike ? `<span class="status-badge" style="background:rgba(34,197,94,0.1); color:var(--green);">⚡ VOL SPIKE</span>` : ''}
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                            <div>
+                                <b>${r.symbol}</b> 
+                                <span class="ai-btn" onclick="toggleAI('${r.symbol}')" style="margin-left:8px;">📊 AI Breakdown ▾</span>
+                            </div>
+                            <span style="font-weight:bold; color:${confColor}; font-size:12px;">${r.confidence}% Conf</span>
+                        </div>
+                        
+                        <div id="ai-${r.symbol}" class="ai-panel">
+                            <div style="color:var(--blue); font-weight:bold; margin-bottom:5px;">AI Reasoning:</div>
+                            <ul style="margin:0; padding-left:15px; color:#a1a1aa; margin-bottom:8px;">
+                                ${r.reasons.map(reason => `<li style="margin-bottom:3px;">${reason}</li>`).join('')}
+                            </ul>
+                            <div style="font-weight:bold; color:${confColor}; border-top:1px solid rgba(255,255,255,0.1); padding-top:5px;">
+                                Action: ${actionText}
+                            </div>
                         </div>
                     </div>`;
                 }).join("");
@@ -368,7 +458,6 @@ def home():
 
     setInterval(fetchBotData, 3000);
     fetchBotData(); 
-
 </script>
 </body>
 </html>
