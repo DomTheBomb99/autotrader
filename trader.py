@@ -43,7 +43,7 @@ bot = {
     "exposure_pct": 0
 }
 
-activity_log = ["TradeBot Engine Online... Establishing secure connection."]
+activity_log = ["TradeBot Engine Online... Native Graphics Engine Engaged."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
@@ -233,7 +233,6 @@ def home():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TradeBot Terminal</title>
-<script src="https://cdn.jsdelivr.net/npm/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <style>
     :root { --bg: #0b1220; --card: #111827; --border: #1f2937; --text: #e5e7eb; --green: #22c55e; --yellow: #eab308; --red: #ef4444; --orange: #f59e0b; --blue: #3b82f6; }
     body { margin:0; background:var(--bg); color:var(--text); font-family:sans-serif; overflow-x:hidden; }
@@ -287,41 +286,106 @@ def home():
                     <span style="color:var(--orange);">21 EMA</span>
                 </div>
             </div>
-            <div id="xrayChart" style="height:180px; width:100%; position:relative;"></div>
+            <div style="height:180px; width:100%; position:relative;">
+                <canvas id="xrayCanvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas>
+            </div>
         </div>
     </div>
     <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Activity</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
 </div>
 
 <script>
-    // Global Error Catcher
-    window.onerror = function(msg) {
-        console.error("Global crash prevented:", msg);
-        document.getElementById("status").innerText = "UI RECOVERED";
-        document.getElementById("status").style.background = "var(--orange)";
-    };
-
     const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
-    
-    // FIX: Wrapped Chart initialization in Try/Catch so if network blocks it, UI doesn't freeze
-    let chart, candleSeries, ema8Series, ema21Series;
-    try {
-        const chartOptions = {
-            layout: { textColor: '#a1a1aa', background: { type: 'solid', color: 'transparent' } },
-            grid: { vertLines: { color: 'rgba(31, 41, 55, 0.2)' }, horzLines: { color: 'rgba(31, 41, 55, 0.2)' } },
-            timeScale: { timeVisible: false, borderColor: '#1f2937' },
-            rightPriceScale: { borderColor: '#1f2937' }
-        };
-        chart = LightweightCharts.createChart(document.getElementById('xrayChart'), chartOptions);
-        candleSeries = chart.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444' });
-        ema8Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 2, crosshairMarkerVisible: false });
-        ema21Series = chart.addLineSeries({ color: '#f59e0b', lineWidth: 2, crosshairMarkerVisible: false });
 
-        window.addEventListener('resize', () => { chart.resize(document.getElementById('xrayChart').clientWidth, 180); });
-    } catch(e) {
-        console.warn("Network blocked chart library. Falling back to text mode.");
-        document.getElementById('xrayChart').innerHTML = "<div style='color:var(--orange); padding:20px; text-align:center; border: 1px dashed var(--border); border-radius: 8px;'>Chart blocked by Network/AdBlocker.<br>Bot is still running perfectly in background.</div>";
+    // =========================================================
+    // NATIVE CANVAS CANDLESTICK ENGINE (Zero Dependencies)
+    // =========================================================
+    function drawNativeChart(data) {
+        const canvas = document.getElementById('xrayCanvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        
+        // Handle high-res displays dynamically
+        const rect = canvas.parentElement.getBoundingClientRect();
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        if (!data || !data.close || data.close.length === 0) return;
+
+        const w = canvas.width;
+        const h = canvas.height;
+        const len = data.close.length;
+        
+        let minP = Math.min(...data.low, ...data.ema8, ...data.ema21);
+        let maxP = Math.max(...data.high, ...data.ema8, ...data.ema21);
+        const pad = (maxP - minP) * 0.1 || 1;
+        minP -= pad; maxP += pad;
+
+        const step = w / len;
+        const candleW = step * 0.6;
+
+        function getY(price) { return h - ((price - minP) / (maxP - minP)) * h; }
+
+        // Draw Grid
+        ctx.strokeStyle = 'rgba(31, 41, 55, 0.5)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for(let i=1; i<4; i++) {
+            let y = i * (h/4);
+            ctx.moveTo(0, y); ctx.lineTo(w, y);
+        }
+        ctx.stroke();
+
+        // Draw Candles
+        for(let i=0; i<len; i++) {
+            const x = i * step + step/2;
+            const o = data.open[i], c = data.close[i], hi = data.high[i], lo = data.low[i];
+            const isGreen = c >= o;
+            ctx.strokeStyle = isGreen ? '#22c55e' : '#ef4444';
+            ctx.fillStyle = isGreen ? '#22c55e' : '#ef4444';
+
+            // Wick
+            ctx.beginPath();
+            ctx.moveTo(x, getY(hi));
+            ctx.lineTo(x, getY(lo));
+            ctx.stroke();
+
+            // Body
+            const bTop = getY(Math.max(o, c));
+            const bBot = getY(Math.min(o, c));
+            const bHeight = Math.max(1, bBot - bTop);
+            ctx.fillRect(x - candleW/2, bTop, candleW, bHeight);
+        }
+
+        // Draw 21 EMA (Orange)
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for(let i=0; i<len; i++) {
+            const x = i * step + step/2;
+            const y = getY(data.ema21[i]);
+            if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Draw 8 EMA (Blue)
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for(let i=0; i<len; i++) {
+            const x = i * step + step/2;
+            const y = getY(data.ema8[i]);
+            if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
     }
+
+    // Auto-resize chart
+    window.addEventListener('resize', () => {
+        if(window.lastChartData) drawNativeChart(window.lastChartData);
+    });
 
     function togglePanel(id) {
         const panel = document.getElementById(id);
@@ -331,21 +395,17 @@ def home():
     function createSparkline(dataArray, color) {
         try {
             if(!dataArray || dataArray.length === 0) return '';
-            const max = Math.max.apply(null, dataArray), min = Math.min.apply(null, dataArray), range = (max - min) || 1;
+            const max = Math.max(...dataArray), min = Math.min(...dataArray), range = (max - min) || 1;
             let pts = "";
-            for(let i=0; i<dataArray.length; i++) {
-                pts += (i/(dataArray.length-1)*60) + ',' + (25 - ((dataArray[i]-min)/range)*25) + ' ';
-            }
+            for(let i=0; i<dataArray.length; i++) pts += (i/(dataArray.length-1)*60) + ',' + (25 - ((dataArray[i]-min)/range)*25) + ' ';
             return '<svg class="sparkline" style="stroke:'+color+'; fill:none; stroke-width:1.5px;"><polyline points="'+pts+'"/></svg>';
         } catch(e) { return ''; }
     }
 
     async function fetchData() {
         try {
-            // FIX: Prevent fetch from hanging forever
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 8000);
-            
             const response = await fetch('/api/data', { signal: controller.signal });
             clearTimeout(timeoutId);
             
@@ -387,19 +447,10 @@ def home():
                 const topTarget = data.ranked[0];
                 document.getElementById("chart-title").innerText = "X-Ray: " + topTarget.symbol;
                 
-                // Only update chart if it successfully loaded
-                if(chart && topTarget.spark && topTarget.spark.dates.length > 0) {
-                    const ohlcData = []; const ema8Data = []; const ema21Data = [];
-                    for(let i=0; i<topTarget.spark.dates.length; i++) {
-                        const dateStr = topTarget.spark.dates[i];
-                        ohlcData.push({ time: dateStr, open: topTarget.spark.open[i], high: topTarget.spark.high[i], low: topTarget.spark.low[i], close: topTarget.spark.close[i] });
-                        ema8Data.push({ time: dateStr, value: topTarget.spark.ema8[i] });
-                        ema21Data.push({ time: dateStr, value: topTarget.spark.ema21[i] });
-                    }
-                    candleSeries.setData(ohlcData);
-                    ema8Series.setData(ema8Data);
-                    ema21Series.setData(ema21Data);
-                    chart.timeScale().fitContent();
+                // NATIVE CHART DRAW
+                if(topTarget.spark && topTarget.spark.close.length > 0) {
+                    window.lastChartData = topTarget.spark;
+                    drawNativeChart(topTarget.spark);
                 }
 
                 let html = '';
@@ -444,7 +495,3 @@ def home():
 </script>
 </body>
 </html>
-"""
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, threaded=True)
