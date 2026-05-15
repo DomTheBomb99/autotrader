@@ -2,8 +2,8 @@ import os
 import time
 import threading
 import requests
+import math
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 
@@ -62,7 +62,7 @@ def sanitize_data(obj):
     if isinstance(obj, dict): return {k: sanitize_data(v) for k, v in obj.items()}
     elif isinstance(obj, list): return [sanitize_data(v) for v in obj]
     elif isinstance(obj, float):
-        if np.isnan(obj) or np.isinf(obj): return 0.0
+        if math.isnan(obj) or math.isinf(obj): return 0.0
         return obj
     return obj
 
@@ -78,7 +78,6 @@ def get_positions():
         return r.json() if r.status_code == 200 else []
     except: return []
 
-# REBUILT: Highly stable multi-symbol endpoint
 def get_daily_bars(symbol, limit=100):
     is_crypto = "/" in symbol
     url = "https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/bars"
@@ -92,16 +91,14 @@ def get_daily_bars(symbol, limit=100):
         return pd.DataFrame(bars)
     except: return None
 
-# REBUILT: Diagnostic Fallbacks to prevent silent blank screens
 def analyze_swing_symbol(symbol, regime):
     try:
         df = get_daily_bars(symbol, 100)
         
-        # If API returns empty, push an error directly to the UI instead of hiding it
         if df is None or len(df) < 20: 
             return {
                 "symbol": symbol, "confidence": 0, "reasons": [], 
-                "counter_reasons": ["⚠️ Missing or Insufficient Data from Broker"], 
+                "counter_reasons": ["Missing or Insufficient Data from Broker"], 
                 "price": 0.0, "multiplier": 0.0, "risk": "HIGH", 
                 "spark": {"dates": [], "open": [], "high": [], "low": [], "close": [], "ema8": [], "ema21": []}
             }
@@ -156,7 +153,7 @@ def analyze_swing_symbol(symbol, regime):
     except Exception as e: 
         return {
             "symbol": symbol, "confidence": 0, "reasons": [], 
-            "counter_reasons": [f"⚠️ System Error: {str(e)}"], 
+            "counter_reasons": ["System Error retrieving data"], 
             "price": 0.0, "multiplier": 0.0, "risk": "HIGH", 
             "spark": {"dates": [], "open": [], "high": [], "low": [], "close": [], "ema8": [], "ema21": []}
         }
@@ -182,7 +179,6 @@ def engine():
                 spy_ema = float(spy_df['c'].ewm(span=10, adjust=False).mean().iloc[-1])
                 regime = "BULLISH" if spy_c > spy_ema else "BEARISH"
 
-            # Check exits
             for p in pos:
                 sym = p.get('symbol')
                 if not sym or sym == "USD": continue
@@ -195,16 +191,14 @@ def engine():
                             log_event(f"EXIT: {sym} closed below 21 EMA.")
                             requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS, timeout=5)
                         else:
-                            # Prevents log spam when market is closed
                             log_event(f"HOLDING: {sym} is below 21 EMA, but market is closed.")
 
-            # Analyze market
             active_list = UNIVERSE + bot["crypto_watchlist"]
             ranked_results = [analyze_swing_symbol(s, regime) for s in active_list]
             ranked = [r for r in ranked_results if r is not None]
             ranked.sort(key=lambda x: x["confidence"], reverse=True)
 
-            log_event(f"📡 Radar Swept {len(ranked)} targets. Regime: {regime}")
+            log_event(f"Radar Swept {len(ranked)} targets. Regime: {regime}")
 
             for r in ranked[:2]:
                 if r["multiplier"] > 0 and not any(p.get('symbol') == r['symbol'] for p in pos):
@@ -395,9 +389,6 @@ def home():
             
             const rankedContainer = document.getElementById("ranked");
             if (data.ranked && data.ranked.length > 0) {
-                
-                // NATIVE CHART UPDATE
-                // We find the top valid target to display on the chart
                 let chartTarget = null;
                 for(let r of data.ranked) {
                     if (r.spark && r.spark.close && r.spark.close.length > 0) { chartTarget = r; break; }
@@ -413,20 +404,16 @@ def home():
                 let html = '';
                 for (let r of data.ranked) {
                     const color = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
-                    
-                    // Display exact API Error if data is missing
                     let statusText = r.multiplier > 0 ? "🟢 ACQUIRING" : (r.confidence > 40 ? "🟡 WATCHING" : "🔴 REJECTED");
-                    if (r.confidence === 0 && r.counter_reasons.some(x => x.includes("⚠️"))) { statusText = "🟠 API ERROR"; }
-
                     let reasonsHtml = '';
                     if (r.reasons) for (let res of r.reasons) reasonsHtml += '<li>'+res+'</li>';
                     if (r.counter_reasons) for (let cr of r.counter_reasons) reasonsHtml += '<li style="color:var(--orange)">'+cr+'</li>';
-                    
                     html += '<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;">';
                     html += '<div style="display:flex; justify-content:space-between; align-items:center;">';
                     html += '<div style="display:flex; gap:10px; align-items:center;"><b>'+r.symbol+'</b>'+createSparkline(r.spark.close, color)+'</div>';
                     html += '<div style="text-align:right;"><div style="font-weight:bold; color:'+color+';">'+r.confidence+'% Conf</div><div style="font-size:9px; color:#a1a1aa; margin-top:3px;">'+statusText+'</div></div>';
-                    html += '</div><div style="margin-top:8px;"><span class="ai-btn" onclick="togglePanel(\'ai-'+r.symbol+'\')">Breakdown ▾</span></div>';
+                    html += '</div><div style="margin-top:8px;">';
+                    html += "<span class='ai-btn' onclick='togglePanel(\"ai-" + r.symbol + "\")'>Breakdown ▾</span></div>";
                     html += '<div id="ai-'+r.symbol+'" class="ai-panel"><ul>'+reasonsHtml+'</ul></div></div>';
                 }
                 rankedContainer.innerHTML = html;
