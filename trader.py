@@ -39,7 +39,7 @@ bot = {
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"]
 }
 
-activity_log = ["TradeBot Engine v8.0 Online... Visuals Restored."]
+activity_log = ["TradeBot Engine v9.0 Online... UI Stabilized."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
@@ -103,7 +103,6 @@ def analyze_swing_symbol(symbol, regime):
     try:
         df, error_msg = get_daily_bars(symbol, 100)
         
-        # Fallback if API blocks us
         if df is None or len(df) < 20: 
             return {
                 "symbol": symbol, "confidence": 0, "reasons": [], 
@@ -152,7 +151,6 @@ def analyze_swing_symbol(symbol, regime):
         confidence = max(0, min(100, confidence))
         multiplier = 1.5 if confidence >= 80 else (1.0 if confidence >= 65 else 0.0)
 
-        # THE MISSING PIECE: Appending spark_data back into the return dictionary
         return {
             "symbol": symbol, "confidence": confidence, "reasons": reasons, 
             "counter_reasons": counter_reasons, "price": float(price_now), 
@@ -268,7 +266,7 @@ def home():
     <div><span id="regime" style="color:var(--orange);">REGIME: SCANNING</span></div>
 </div>
 <div class="header">
-    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v8.0</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
+    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v9.0</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
     <div class="pill" id="status" style="background:var(--orange)">CONNECTING...</div>
 </div>
 <div class="grid">
@@ -357,125 +355,113 @@ def home():
             const max = Math.max.apply(null, dataArray), min = Math.min.apply(null, dataArray), range = (max - min) || 1;
             let pts = "";
             for(let i=0; i<dataArray.length; i++) pts += (i/(dataArray.length-1)*60) + ',' + (25 - ((dataArray[i]-min)/range)*25) + ' ';
-            return '<svg class="sparkline" style="stroke:'+color+'; fill:none; stroke-width:1.5px;"><polyline points="'+pts+'"/></svg>';
+            return `<svg class="sparkline" style="stroke:${color}; fill:none; stroke-width:1.5px;"><polyline points="${pts}"/></svg>`;
         } catch(e) { return ''; }
     }
 
-    function updateDashboard() {
-        var xhr = new XMLHttpRequest();
-        xhr.open("GET", "/api/data?t=" + new Date().getTime(), true);
-        xhr.timeout = 5000;
-        
-        xhr.onload = function() {
-            if (xhr.status === 200) {
-                try {
-                    var data = JSON.parse(xhr.responseText);
-                    
-                    document.getElementById("status").innerText = "LIVE SYNC";
-                    document.getElementById("status").style.background = "var(--green)";
-                    
-                    document.getElementById("g-state").innerText = data.bot_stats.ai_state || "---";
-                    document.getElementById("g-exp").innerText = data.bot_stats.exposure || "0%";
-                    
-                    var regimeSpan = document.getElementById("regime");
-                    regimeSpan.innerText = "REGIME: " + (data.market_regime || "UNKNOWN");
-                    regimeSpan.style.color = (data.market_regime === "BULLISH") ? "var(--green)" : "var(--red)";
-                    
-                    var eq = parseFloat(data.account.equity || 0);
-                    var ca = parseFloat(data.account.cash || 0);
-                    document.getElementById("equity").innerText = "$" + eq.toFixed(2);
-                    document.getElementById("cash").innerText = "$" + ca.toFixed(2);
-                    
-                    var posHtml = "";
-                    if (data.positions && data.positions.length > 0) {
-                        posHtml += '<table><thead><tr><th>Asset</th><th>Entry</th><th>Price</th><th>P/L</th></tr></thead><tbody>';
-                        for (var i = 0; i < data.positions.length; i++) {
-                            var p = data.positions[i];
-                            var pl = parseFloat(p.unrealized_intraday_pl || 0);
-                            var color = pl >= 0 ? "var(--green)" : "var(--red)";
-                            posHtml += '<tr><td><b>' + p.symbol + '</b></td><td>$' + parseFloat(p.avg_entry_price).toFixed(2) + '</td><td>$' + parseFloat(p.current_price).toFixed(2) + '</td><td style="color:' + color + '; font-weight:bold;">$' + pl.toFixed(2) + '</td></tr>';
-                        }
-                        posHtml += '</tbody></table>';
-                    } else {
-                        posHtml = "<div style='text-align:center; padding:20px; color:var(--orange);'>No Swings Active. Scouting...</div>";
-                    }
-                    document.getElementById("pos-container").innerHTML = posHtml;
-                    
-                    var rankHtml = "";
-                    if (data.ranked && data.ranked.length > 0) {
-                        
-                        let chartTarget = null;
-                        for(let i=0; i<data.ranked.length; i++) { 
-                            if (data.ranked[i].spark && data.ranked[i].spark.close && data.ranked[i].spark.close.length > 0) { chartTarget = data.ranked[i]; break; } 
-                        }
-                        
-                        if (chartTarget) {
-                            document.getElementById("chart-title").innerText = "X-Ray: " + chartTarget.symbol;
-                            drawNativeChart(chartTarget.spark);
-                        }
-                        
-                        for (var j = 0; j < data.ranked.length; j++) {
-                            var r = data.ranked[j];
-                            var rColor = r.confidence >= 80 ? "var(--green)" : (r.confidence >= 65 ? "var(--yellow)" : "var(--red)");
-                            var stat = r.multiplier > 0 ? "ACQUIRING" : "WATCHING";
-                            
-                            if (r.counter_reasons && r.counter_reasons[0] && r.counter_reasons[0].indexOf("API ERROR") !== -1) {
-                                stat = "API ERROR";
-                            } else if (r.confidence === 0) {
-                                stat = "REJECTED";
-                            }
-                            
-                            rankHtml += "<div style='margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;'>";
-                            rankHtml += "<div style='display:flex; justify-content:space-between;'>";
-                            rankHtml += "<div><div style='display:flex; gap:10px; align-items:center;'><b>" + r.symbol + "</b>" + createSparkline(r.spark.close, rColor) + "</div><span style='font-size:10px; color:#a1a1aa;'>$" + parseFloat(r.price).toFixed(2) + "</span></div>";
-                            rankHtml += "<div style='text-align:right;'><b style='color:" + rColor + ";'>" + r.confidence + "%</b><br><span style='font-size:9px; color:" + rColor + ";'>" + stat + "</span></div>";
-                            rankHtml += "</div><div style='margin-top:8px;'>";
-                            rankHtml += "<span class='ai-btn' onclick='togglePanel(\"ai-" + r.symbol + "\")'>Breakdown ▾</span></div>";
-                            
-                            var reasonsHtml = "";
-                            if (r.reasons) { for (var x=0; x<r.reasons.length; x++) reasonsHtml += "<li>"+r.reasons[x]+"</li>"; }
-                            if (r.counter_reasons) { for (var y=0; y<r.counter_reasons.length; y++) reasonsHtml += "<li style='color:var(--orange)'>"+r.counter_reasons[y]+"</li>"; }
-                            rankHtml += "<div id='ai-"+r.symbol+"' class='ai-panel'><ul>"+reasonsHtml+"</ul></div></div>";
-                        }
-                    } else {
-                        rankHtml = "<div style='text-align:center; padding:15px; color:var(--orange);'>Sweeping Universe...</div>";
-                    }
-                    document.getElementById("ranked").innerHTML = rankHtml;
-                    
-                    var logHtml = "";
-                    if (data.activity && data.activity.length > 0) {
-                        for (var k = 0; k < data.activity.length; k++) {
-                            var a = data.activity[k];
-                            var lColor = (a.indexOf("ERROR") !== -1 || a.indexOf("Crash") !== -1) ? "var(--red)" : "#a1a1aa";
-                            logHtml += "<div style='padding:5px 0; border-bottom:1px solid #1f2937; color:" + lColor + ";'>" + a + "</div>";
-                        }
-                    }
-                    document.getElementById("logs").innerHTML = logHtml;
-                    
-                } catch (e) {
-                    document.getElementById("logs").innerHTML = "<div style='color:red;'>[JSON Parse Error] " + e.message + "</div>" + document.getElementById("logs").innerHTML;
-                }
-            } else {
-                document.getElementById("status").innerText = "SERVER ERROR";
+    async function fetchData() {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 6000);
+            const response = await fetch('/api/data?t=' + new Date().getTime(), { signal: controller.signal });
+            clearTimeout(timeoutId);
+            
+            const data = await response.json();
+            
+            if (data.error) {
+                document.getElementById("status").innerText = "JSON ERROR";
                 document.getElementById("status").style.background = "var(--red)";
+                return;
             }
-        };
-        
-        xhr.onerror = function() {
-            document.getElementById("status").innerText = "NETWORK ERROR";
+
+            document.getElementById("status").innerText = "LIVE SYNC";
+            document.getElementById("status").style.background = "var(--green)";
+            
+            document.getElementById("g-state").innerText = data.bot_stats.ai_state;
+            document.getElementById("g-exp").innerText = data.bot_stats.exposure;
+            document.getElementById("g-vol").innerText = data.bot_stats.volatility;
+            
+            const regimeSpan = document.getElementById("regime");
+            regimeSpan.innerText = "REGIME: " + data.market_regime;
+            regimeSpan.style.color = data.market_regime.includes("BULLISH") ? "var(--green)" : "var(--red)";
+            
+            document.getElementById("equity").innerText = formatter.format(data.account.equity || 0);
+            document.getElementById("cash").innerText = formatter.format(data.account.cash || 0);
+            
+            const posContainer = document.getElementById("pos-container");
+            if (data.positions && data.positions.length > 0) {
+                let html = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Price</th><th>P/L</th></tr></thead><tbody>`;
+                for (let i = 0; i < data.positions.length; i++) {
+                    const p = data.positions[i];
+                    const pl = parseFloat(p.unrealized_intraday_pl || 0);
+                    const plColor = pl >= 0 ? 'var(--green)' : 'var(--red)';
+                    html += `<tr><td><b>${p.symbol}</b></td><td>${formatter.format(p.avg_entry_price)}</td><td>${formatter.format(p.current_price)}</td><td style="color:${plColor}; font-weight:bold;">${formatter.format(pl)}</td></tr>`;
+                }
+                posContainer.innerHTML = html + `</tbody></table>`;
+            } else { posContainer.innerHTML = `<div style="text-align:center; padding:20px; color:var(--orange);">No Swings Active. Scouting...</div>`; }
+            
+            const rankedContainer = document.getElementById("ranked");
+            if (data.ranked && data.ranked.length > 0) {
+                let chartTarget = null;
+                for(let i=0; i<data.ranked.length; i++) { 
+                    if (data.ranked[i].spark && data.ranked[i].spark.close && data.ranked[i].spark.close.length > 0) { chartTarget = data.ranked[i]; break; } 
+                }
+                
+                if (chartTarget) {
+                    document.getElementById("chart-title").innerText = "X-Ray: " + chartTarget.symbol;
+                    drawNativeChart(chartTarget.spark);
+                }
+
+                let html = '';
+                for (let i = 0; i < data.ranked.length; i++) {
+                    const r = data.ranked[i];
+                    const color = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
+                    let statusText = r.multiplier > 0 ? "🟢 ACQUIRING" : (r.confidence > 40 ? "🟡 WATCHING" : "🔴 REJECTED");
+                    let reasonsHtml = '';
+                    if (r.reasons) { for (let j=0; j<r.reasons.length; j++) reasonsHtml += `<li>${r.reasons[j]}</li>`; }
+                    if (r.counter_reasons) { for (let k=0; k<r.counter_reasons.length; k++) reasonsHtml += `<li style="color:var(--orange)">${r.counter_reasons[k]}</li>`; }
+                    
+                    html += `
+                    <div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <div style="display:flex; gap:10px; align-items:center;">
+                                <b>${r.symbol}</b>${createSparkline(r.spark.close, color)}
+                            </div>
+                            <div style="text-align:right;">
+                                <div style="font-weight:bold; color:${color};">${r.confidence}% Conf</div>
+                                <div style="font-size:9px; color:#a1a1aa; margin-top:3px;">${statusText}</div>
+                            </div>
+                        </div>
+                        <div style="margin-top:8px;">
+                            <span class="ai-btn" onclick="togglePanel('ai-${r.symbol}')">Breakdown ▾</span>
+                        </div>
+                        <div id="ai-${r.symbol}" class="ai-panel">
+                            <ul>${reasonsHtml}</ul>
+                        </div>
+                    </div>`;
+                }
+                rankedContainer.innerHTML = html;
+            } else { rankedContainer.innerHTML = `<div style="padding:15px; text-align:center; color:var(--orange); border: 1px dashed var(--border); border-radius: 8px;">📡 Waiting for Sweep...</div>`; }
+            
+            const logsContainer = document.getElementById("logs");
+            if (data.activity && data.activity.length > 0) {
+                let html = ''; 
+                for (let i = 0; i < data.activity.length; i++) {
+                    const a = data.activity[i];
+                    const logColor = (a.indexOf("ERROR") !== -1 || a.indexOf("CRASH") !== -1) ? "var(--red)" : "#a1a1aa";
+                    html += `<div style="padding:5px 0; border-bottom:1px solid #1f2937; color:${logColor};">${a}</div>`;
+                }
+                logsContainer.innerHTML = html;
+            }
+        } catch (error) { 
+            document.getElementById("status").innerText = "UI ERROR / RECONNECTING";
             document.getElementById("status").style.background = "var(--red)";
-        };
-        
-        xhr.ontimeout = function() {
-            document.getElementById("status").innerText = "TIMEOUT";
-            document.getElementById("status").style.background = "var(--orange)";
-        };
-        
-        xhr.send();
+            document.getElementById("logs").innerHTML = `<div style="color:red; padding:5px 0;">[JS Crash] ${error.message}</div>` + document.getElementById("logs").innerHTML;
+        }
     }
 
-    setInterval(updateDashboard, 3000);
-    updateDashboard();
+    setInterval(fetchData, 3000);
+    fetchData();
 </script>
 </body>
 </html>
