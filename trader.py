@@ -37,7 +37,7 @@ bot = {
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"]
 }
 
-activity_log = ["TradeBot Engine v7.1 Online... Typo Squashed."]
+activity_log = ["TradeBot Engine v7.2 Online... Waiting for engine."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
@@ -118,6 +118,18 @@ def analyze_swing_symbol(symbol, regime):
         ema21 = float(df["21_EMA"].iloc[-1])
         sma50 = float(df["50_SMA"].iloc[-1])
         
+        dates = [str(t)[:10] for t in df["t"].tail(30).tolist()] if "t" in df else [str(i) for i in range(30)]
+
+        spark_data = {
+            "dates": dates,
+            "open": [float(x) for x in df["o"].tail(30).tolist()],
+            "high": [float(x) for x in df["h"].tail(30).tolist()],
+            "low": [float(x) for x in df["l"].tail(30).tolist()],
+            "close": [float(x) for x in df["c"].tail(30).tolist()],
+            "ema8": [float(x) for x in df["8_EMA"].tail(30).tolist()],
+            "ema21": [float(x) for x in df["21_EMA"].tail(30).tolist()]
+        }
+        
         confidence = 50 
         reasons = []
         counter_reasons = []
@@ -139,10 +151,10 @@ def analyze_swing_symbol(symbol, regime):
         return {
             "symbol": symbol, "confidence": confidence, "reasons": reasons, 
             "counter_reasons": counter_reasons, "price": float(price_now), 
-            "multiplier": multiplier, "risk": "LOW" if price_now > ema21 else "HIGH"
+            "multiplier": multiplier, "risk": "LOW" if price_now > ema21 else "HIGH", "spark": spark_data
         }
     except Exception as e: 
-        return {"symbol": symbol, "confidence": 0, "reasons": [], "counter_reasons": [f"Crash: {str(e)}"], "price": 0.0, "multiplier": 0.0, "risk": "HIGH"}
+        return {"symbol": symbol, "confidence": 0, "reasons": [], "counter_reasons": [f"Crash: {str(e)}"], "price": 0.0, "multiplier": 0.0, "risk": "HIGH", "spark": {}}
 
 def engine():
     global global_state
@@ -175,7 +187,6 @@ def engine():
             ranked_results.sort(key=lambda x: x["confidence"], reverse=True)
             log_event(f"Radar Swept {len(ranked_results)} targets. Regime: {regime}")
 
-            # >>> THE FIX IS RIGHT HERE. Changed `ranked` to `ranked_results` <<<
             for r in ranked_results[:2]:
                 if r["multiplier"] > 0 and not any(p.get('symbol') == r['symbol'] for p in pos):
                     if cash >= (bot.get("base_trade_usd") * r["multiplier"]):
@@ -245,7 +256,7 @@ def home():
     <div><span id="regime" style="color:var(--orange);">REGIME: SCANNING</span></div>
 </div>
 <div class="header">
-    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v7.1</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
+    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v7.2</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
     <div class="pill" id="status" style="background:var(--orange)">CONNECTING...</div>
 </div>
 <div class="grid">
@@ -261,6 +272,12 @@ def home():
         <div class="card" style="flex-grow:1; overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Live Swings</div><div id="pos-container">
             <div style="text-align:center; padding:20px; color:var(--orange);">Connecting to broker...</div>
         </div></div>
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:15px;">
+                <div><div class="muted" id="chart-title">AI Strategy X-Ray</div><div style="font-size:12px; color:#a1a1aa;">Tracking Top Target</div></div>
+            </div>
+            <div style="height:180px; width:100%; position:relative;"><canvas id="xrayCanvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas></div>
+        </div>
     </div>
     <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Activity Log</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
 </div>
@@ -314,7 +331,12 @@ def home():
                             var r = data.ranked[j];
                             var rColor = r.confidence >= 80 ? "var(--green)" : (r.confidence >= 65 ? "var(--yellow)" : "var(--red)");
                             var stat = r.multiplier > 0 ? "ACQUIRING" : "WATCHING";
-                            if (r.confidence === 0) stat = "REJECTED/ERROR";
+                            
+                            if (r.counter_reasons && r.counter_reasons[0] && r.counter_reasons[0].indexOf("API ERROR") !== -1) {
+                                stat = "API ERROR";
+                            } else if (r.confidence === 0) {
+                                stat = "REJECTED";
+                            }
                             
                             rankHtml += "<div style='margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;'>";
                             rankHtml += "<div style='display:flex; justify-content:space-between;'>";
@@ -364,3 +386,7 @@ def home():
 </script>
 </body>
 </html>
+"""
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT, threaded=True)
