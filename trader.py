@@ -58,12 +58,9 @@ def log_event(msg):
     if len(activity_log) > 30:
         activity_log.pop(0)
 
-# HELPER: The "Nuclear Sanitizer" - Ensures JSON never crashes
 def sanitize_data(obj):
-    if isinstance(obj, dict):
-        return {k: sanitize_data(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [sanitize_data(v) for v in obj]
+    if isinstance(obj, dict): return {k: sanitize_data(v) for k, v in obj.items()}
+    elif isinstance(obj, list): return [sanitize_data(v) for v in obj]
     elif isinstance(obj, float):
         if np.isnan(obj) or np.isinf(obj): return 0.0
         return obj
@@ -81,22 +78,33 @@ def get_positions():
         return r.json() if r.status_code == 200 else []
     except: return []
 
+# REBUILT: Highly stable multi-symbol endpoint
 def get_daily_bars(symbol, limit=100):
     is_crypto = "/" in symbol
-    url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/bars"
-    params = {"symbols": symbol, "timeframe": "1Day", "limit": limit} if is_crypto else {"symbols": symbol, "timeframe": "1Day", "limit": limit, "feed": "iex"}
+    url = "https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/bars"
+    params = {"symbols": symbol, "timeframe": "1Day", "limit": limit}
     try:
         r = requests.get(url, headers=HEADERS, params=params, timeout=8)
         if r.status_code != 200: return None
         data = r.json()
         bars = data.get("bars", {}).get(symbol, [])
-        return pd.DataFrame(bars) if len(bars) > 0 else None
+        if not bars: return None
+        return pd.DataFrame(bars)
     except: return None
 
+# REBUILT: Diagnostic Fallbacks to prevent silent blank screens
 def analyze_swing_symbol(symbol, regime):
     try:
         df = get_daily_bars(symbol, 100)
-        if df is None or len(df) < 50: return None
+        
+        # If API returns empty, push an error directly to the UI instead of hiding it
+        if df is None or len(df) < 20: 
+            return {
+                "symbol": symbol, "confidence": 0, "reasons": [], 
+                "counter_reasons": ["⚠️ Missing or Insufficient Data from Broker"], 
+                "price": 0.0, "multiplier": 0.0, "risk": "HIGH", 
+                "spark": {"dates": [], "open": [], "high": [], "low": [], "close": [], "ema8": [], "ema21": []}
+            }
         
         df['8_EMA'] = df['c'].ewm(span=8, adjust=False).mean()
         df['21_EMA'] = df['c'].ewm(span=21, adjust=False).mean()
@@ -134,6 +142,7 @@ def analyze_swing_symbol(symbol, regime):
         
         if regime == "BULLISH": confidence += 15; reasons.append("Bullish Market")
         elif regime == "BEARISH": confidence -= 25; counter_reasons.append("Bearish Headwind")
+        elif regime == "API ERROR": confidence -= 30; counter_reasons.append("Market Regime Unreadable")
 
         confidence = max(0, min(100, confidence))
         multiplier = 1.5 if confidence >= 80 else (1.0 if confidence >= 65 else 0.0)
@@ -144,7 +153,13 @@ def analyze_swing_symbol(symbol, regime):
             "counter_reasons": counter_reasons, "price": float(price_now), 
             "multiplier": multiplier, "risk": risk_lvl, "spark": spark_data
         }
-    except: return None
+    except Exception as e: 
+        return {
+            "symbol": symbol, "confidence": 0, "reasons": [], 
+            "counter_reasons": [f"⚠️ System Error: {str(e)}"], 
+            "price": 0.0, "multiplier": 0.0, "risk": "HIGH", 
+            "spark": {"dates": [], "open": [], "high": [], "low": [], "close": [], "ema8": [], "ema21": []}
+        }
 
 def engine():
     global global_state
@@ -161,8 +176,8 @@ def engine():
             equity = float(acc.get("equity") or 0)
             
             spy_df = get_daily_bars("SPY", 20)
-            regime = "CHOP"
-            if spy_df is not None:
+            regime = "API ERROR"
+            if spy_df is not None and len(spy_df) > 10:
                 spy_c = float(spy_df['c'].iloc[-1])
                 spy_ema = float(spy_df['c'].ewm(span=10, adjust=False).mean().iloc[-1])
                 regime = "BULLISH" if spy_c > spy_ema else "BEARISH"
@@ -176,8 +191,12 @@ def engine():
                     p_df['21_EMA'] = p_df['c'].ewm(span=21, adjust=False).mean()
                     orange_line = float(p_df['21_EMA'].iloc[-1])
                     if float(p.get("current_price")) < orange_line:
-                        log_event(f"EXIT: {sym} closed below 21 EMA.")
-                        requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS, timeout=5)
+                        if is_open:
+                            log_event(f"EXIT: {sym} closed below 21 EMA.")
+                            requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS, timeout=5)
+                        else:
+                            # Prevents log spam when market is closed
+                            log_event(f"HOLDING: {sym} is below 21 EMA, but market is closed.")
 
             # Analyze market
             active_list = UNIVERSE + bot["crypto_watchlist"]
@@ -185,7 +204,7 @@ def engine():
             ranked = [r for r in ranked_results if r is not None]
             ranked.sort(key=lambda x: x["confidence"], reverse=True)
 
-            log_event(f"📡 Radar Swept {len(ranked)} targets. Top: {ranked[0]['symbol'] if ranked else 'NONE'}")
+            log_event(f"📡 Radar Swept {len(ranked)} targets. Regime: {regime}")
 
             for r in ranked[:2]:
                 if r["multiplier"] > 0 and not any(p.get('symbol') == r['symbol'] for p in pos):
@@ -275,9 +294,7 @@ def home():
                     <span style="color:var(--orange);">21 EMA</span>
                 </div>
             </div>
-            <div style="height:180px; width:100%; position:relative;">
-                <canvas id="xrayCanvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas>
-            </div>
+            <div style="height:180px; width:100%; position:relative;"><canvas id="xrayCanvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas></div>
         </div>
     </div>
     <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Activity Log</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
@@ -378,16 +395,33 @@ def home():
             
             const rankedContainer = document.getElementById("ranked");
             if (data.ranked && data.ranked.length > 0) {
-                const topTarget = data.ranked[0];
-                document.getElementById("chart-title").innerText = "X-Ray: " + topTarget.symbol;
-                drawNativeChart(topTarget.spark);
+                
+                // NATIVE CHART UPDATE
+                // We find the top valid target to display on the chart
+                let chartTarget = null;
+                for(let r of data.ranked) {
+                    if (r.spark && r.spark.close && r.spark.close.length > 0) { chartTarget = r; break; }
+                }
+                
+                if (chartTarget) {
+                    document.getElementById("chart-title").innerText = "X-Ray: " + chartTarget.symbol;
+                    drawNativeChart(chartTarget.spark);
+                } else {
+                    document.getElementById("chart-title").innerText = "X-Ray Offline";
+                }
+
                 let html = '';
                 for (let r of data.ranked) {
                     const color = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
+                    
+                    // Display exact API Error if data is missing
                     let statusText = r.multiplier > 0 ? "🟢 ACQUIRING" : (r.confidence > 40 ? "🟡 WATCHING" : "🔴 REJECTED");
+                    if (r.confidence === 0 && r.counter_reasons.some(x => x.includes("⚠️"))) { statusText = "🟠 API ERROR"; }
+
                     let reasonsHtml = '';
                     if (r.reasons) for (let res of r.reasons) reasonsHtml += '<li>'+res+'</li>';
                     if (r.counter_reasons) for (let cr of r.counter_reasons) reasonsHtml += '<li style="color:var(--orange)">'+cr+'</li>';
+                    
                     html += '<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;">';
                     html += '<div style="display:flex; justify-content:space-between; align-items:center;">';
                     html += '<div style="display:flex; gap:10px; align-items:center;"><b>'+r.symbol+'</b>'+createSparkline(r.spark.close, color)+'</div>';
