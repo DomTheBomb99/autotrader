@@ -37,14 +37,14 @@ bot = {
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"]
 }
 
-activity_log = ["TradeBot Engine Online... Scanning Market."]
+activity_log = ["TradeBot Engine Online... Establishing secure connection."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
     "positions": [],
     "ranked": [],
     "activity": activity_log[::-1],
-    "bot_stats": {"wins": 0, "profit": 0.0, "exposure": "0%", "ai_state": "BOOTING", "volatility": "TESTING"},
+    "bot_stats": {"wins": 0, "profit": 0.0, "exposure": "0%", "ai_state": "SWINGING", "volatility": "NORMAL"},
     "market_status": "WAITING...",
     "is_open": False,
     "next_event": "",
@@ -80,10 +80,15 @@ def get_positions():
         return r.json() if r.status_code == 200 else []
     except: return []
 
+# CRITICAL FIX: Explicitly stating feed=iex for free tier stock data
 def get_daily_bars(symbol, limit=100):
     is_crypto = "/" in symbol
     url = "https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/bars"
     params = {"symbols": symbol, "timeframe": "1Day", "limit": limit}
+    
+    if not is_crypto:
+        params["feed"] = "iex" # <--- The missing key that blocked the data
+        
     try:
         r = requests.get(url, headers=HEADERS, params=params, timeout=8)
         if r.status_code != 200: return None
@@ -184,6 +189,15 @@ def engine():
             ranked_results.sort(key=lambda x: x["confidence"], reverse=True)
             log_event(f"Radar Swept {len(ranked_results)} targets. Regime: {regime}")
 
+            for r in ranked[:2]:
+                if r["multiplier"] > 0 and not any(p.get('symbol') == r['symbol'] for p in pos):
+                    if cash >= (bot.get("base_trade_usd") * r["multiplier"]):
+                        val = bot.get("base_trade_usd") * r["multiplier"]
+                        qty = round(val / r["price"], 5)
+                        payload = {"symbol": r['symbol'], "qty": qty, "side": "buy", "type": "market", "time_in_force": "gtc"}
+                        requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload, timeout=5)
+                        log_event(f"BUY: {r['symbol']} (${val:.2f})")
+
             invested = sum(float(p.get("market_value") or 0) for p in pos if p.get('symbol') != "USD")
             exposure = int((invested / equity) * 100) if equity > 0 else 0
 
@@ -198,7 +212,7 @@ def engine():
         except Exception as e:
             log_event(f"ENGINE ERROR: Waiting for broker to stabilize...")
         
-        time.sleep(30)
+        time.sleep(60)
 
 threading.Thread(target=engine, daemon=True).start()
 
@@ -267,13 +281,10 @@ def home():
             <div style="height:180px; width:100%; position:relative;"><canvas id="xrayCanvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas></div>
         </div>
     </div>
-    <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Diagnostic Log</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
+    <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Activity Log</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
 </div>
 
 <script>
-    // SYNCHRONOUS HEARTBEAT - Prove the JS loaded
-    document.getElementById("logs").innerHTML = "<div style='color:var(--green); padding:5px 0; border-bottom:1px solid #1f2937;'>[UI] Interface loaded. Waking up engine...</div>";
-
     const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 
     function drawNativeChart(data) {
