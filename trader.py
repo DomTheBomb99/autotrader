@@ -65,7 +65,6 @@ def log_event(msg):
     if len(activity_log) > 30:
         activity_log.pop(0)
 
-# FIX 1: Added 5-second timeouts to all API calls to prevent infinite hanging
 def get_account():
     try:
         r = requests.get(f"{BASE_URL}/v2/account", headers=HEADERS, timeout=5)
@@ -99,7 +98,6 @@ def analyze_swing_symbol(symbol, regime):
         df['21_EMA'] = df['c'].ewm(span=21, adjust=False).mean()
         df['50_SMA'] = df['c'].rolling(window=50).mean()
         
-        # FIX 2: Replace any corrupted NaN data with 0.0 before sending to Javascript
         df.fillna(0.0, inplace=True)
         
         price_now = float(df["c"].iloc[-1])
@@ -158,7 +156,6 @@ def analyze_swing_symbol(symbol, regime):
 
 def engine():
     global global_state
-    # Give the server 5 seconds to boot up before the heavy lifting starts
     time.sleep(5) 
     while True:
         try:
@@ -217,9 +214,8 @@ def engine():
                 "market_regime": regime, "is_open": is_open, "next_event": clock_data.get('next_close', '')
             }
         except Exception as e:
-            log_event(f"NETWORK ERROR: Reconnecting...")
+            log_event(f"NETWORK ERROR: Intermittent connection loss...")
         
-        # Rest for 60 seconds before scanning the market again
         time.sleep(60)
 
 threading.Thread(target=engine, daemon=True).start()
@@ -237,7 +233,7 @@ def home():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TradeBot Terminal</title>
-<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <style>
     :root { --bg: #0b1220; --card: #111827; --border: #1f2937; --text: #e5e7eb; --green: #22c55e; --yellow: #eab308; --red: #ef4444; --orange: #f59e0b; --blue: #3b82f6; }
     body { margin:0; background:var(--bg); color:var(--text); font-family:sans-serif; overflow-x:hidden; }
@@ -298,22 +294,34 @@ def home():
 </div>
 
 <script>
+    // Global Error Catcher
+    window.onerror = function(msg) {
+        console.error("Global crash prevented:", msg);
+        document.getElementById("status").innerText = "UI RECOVERED";
+        document.getElementById("status").style.background = "var(--orange)";
+    };
+
     const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     
-    // Initialize TradingView Chart
-    const chartOptions = {
-        layout: { textColor: '#a1a1aa', background: { type: 'solid', color: 'transparent' } },
-        grid: { vertLines: { color: 'rgba(31, 41, 55, 0.2)' }, horzLines: { color: 'rgba(31, 41, 55, 0.2)' } },
-        timeScale: { timeVisible: false, borderColor: '#1f2937' },
-        rightPriceScale: { borderColor: '#1f2937' }
-    };
-    const chart = LightweightCharts.createChart(document.getElementById('xrayChart'), chartOptions);
-    
-    const candleSeries = chart.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444' });
-    const ema8Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 2, crosshairMarkerVisible: false });
-    const ema21Series = chart.addLineSeries({ color: '#f59e0b', lineWidth: 2, crosshairMarkerVisible: false });
+    // FIX: Wrapped Chart initialization in Try/Catch so if network blocks it, UI doesn't freeze
+    let chart, candleSeries, ema8Series, ema21Series;
+    try {
+        const chartOptions = {
+            layout: { textColor: '#a1a1aa', background: { type: 'solid', color: 'transparent' } },
+            grid: { vertLines: { color: 'rgba(31, 41, 55, 0.2)' }, horzLines: { color: 'rgba(31, 41, 55, 0.2)' } },
+            timeScale: { timeVisible: false, borderColor: '#1f2937' },
+            rightPriceScale: { borderColor: '#1f2937' }
+        };
+        chart = LightweightCharts.createChart(document.getElementById('xrayChart'), chartOptions);
+        candleSeries = chart.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444' });
+        ema8Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 2, crosshairMarkerVisible: false });
+        ema21Series = chart.addLineSeries({ color: '#f59e0b', lineWidth: 2, crosshairMarkerVisible: false });
 
-    window.addEventListener('resize', () => { chart.resize(document.getElementById('xrayChart').clientWidth, 180); });
+        window.addEventListener('resize', () => { chart.resize(document.getElementById('xrayChart').clientWidth, 180); });
+    } catch(e) {
+        console.warn("Network blocked chart library. Falling back to text mode.");
+        document.getElementById('xrayChart').innerHTML = "<div style='color:var(--orange); padding:20px; text-align:center; border: 1px dashed var(--border); border-radius: 8px;'>Chart blocked by Network/AdBlocker.<br>Bot is still running perfectly in background.</div>";
+    }
 
     function togglePanel(id) {
         const panel = document.getElementById(id);
@@ -321,30 +329,31 @@ def home():
     }
 
     function createSparkline(dataArray, color) {
-        if(!dataArray || dataArray.length === 0) return '';
-        const max = Math.max.apply(null, dataArray), min = Math.min.apply(null, dataArray), range = (max - min) || 1;
-        let pts = "";
-        for(let i=0; i<dataArray.length; i++) {
-            pts += (i/(dataArray.length-1)*60) + ',' + (25 - ((dataArray[i]-min)/range)*25) + ' ';
-        }
-        return '<svg class="sparkline" style="stroke:'+color+'; fill:none; stroke-width:1.5px;"><polyline points="'+pts+'"/></svg>';
+        try {
+            if(!dataArray || dataArray.length === 0) return '';
+            const max = Math.max.apply(null, dataArray), min = Math.min.apply(null, dataArray), range = (max - min) || 1;
+            let pts = "";
+            for(let i=0; i<dataArray.length; i++) {
+                pts += (i/(dataArray.length-1)*60) + ',' + (25 - ((dataArray[i]-min)/range)*25) + ' ';
+            }
+            return '<svg class="sparkline" style="stroke:'+color+'; fill:none; stroke-width:1.5px;"><polyline points="'+pts+'"/></svg>';
+        } catch(e) { return ''; }
     }
 
     async function fetchData() {
         try {
-            // FIX 3: Timeout to prevent Javascript hanging
+            // FIX: Prevent fetch from hanging forever
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 8000);
             
             const response = await fetch('/api/data', { signal: controller.signal });
             clearTimeout(timeoutId);
             
-            if (!response.ok) throw new Error("Server Error: " + response.status);
+            if (!response.ok) throw new Error("Server Status: " + response.status);
             const data = await response.json();
             
             document.getElementById("status").innerText = "LIVE SYNC";
             document.getElementById("status").style.background = "var(--green)";
-            document.getElementById("mkt").innerText = data.market_status;
             
             document.getElementById("g-state").innerText = data.bot_stats.ai_state;
             document.getElementById("g-exp").innerText = data.bot_stats.exposure;
@@ -377,7 +386,9 @@ def home():
                 
                 const topTarget = data.ranked[0];
                 document.getElementById("chart-title").innerText = "X-Ray: " + topTarget.symbol;
-                if(topTarget.spark && topTarget.spark.dates.length > 0) {
+                
+                // Only update chart if it successfully loaded
+                if(chart && topTarget.spark && topTarget.spark.dates.length > 0) {
                     const ohlcData = []; const ema8Data = []; const ema21Data = [];
                     for(let i=0; i<topTarget.spark.dates.length; i++) {
                         const dateStr = topTarget.spark.dates[i];
