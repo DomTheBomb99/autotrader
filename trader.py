@@ -43,14 +43,14 @@ bot = {
     "exposure_pct": 0
 }
 
-activity_log = ["TradeBot Engine Online... Awaiting Data Sync"]
+activity_log = ["TradeBot Engine Online... Establishing secure connection."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
     "positions": [],
     "ranked": [],
     "activity": activity_log[::-1],
-    "bot_stats": {"wins": 0, "profit": 0.0, "exposure": "0%", "ai_state": "SWINGING", "volatility": "NORMAL"},
+    "bot_stats": {"wins": 0, "profit": 0.0, "exposure": "0%", "ai_state": "BOOTING", "volatility": "SCANNING"},
     "market_status": "WAITING...",
     "is_open": False,
     "next_event": "",
@@ -65,15 +65,16 @@ def log_event(msg):
     if len(activity_log) > 30:
         activity_log.pop(0)
 
+# FIX 1: Added 5-second timeouts to all API calls to prevent infinite hanging
 def get_account():
     try:
-        r = requests.get(f"{BASE_URL}/v2/account", headers=HEADERS)
+        r = requests.get(f"{BASE_URL}/v2/account", headers=HEADERS, timeout=5)
         return r.json() if r.status_code == 200 else {"equity": "0.00", "cash": "0.00"}
     except: return {"equity": "0.00", "cash": "0.00"}
 
 def get_positions():
     try:
-        r = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS)
+        r = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS, timeout=5)
         return r.json() if r.status_code == 200 else []
     except: return []
 
@@ -82,7 +83,7 @@ def get_daily_bars(symbol, limit=100):
     url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/bars"
     params = {"symbols": symbol, "timeframe": "1Day", "limit": limit} if is_crypto else {"symbols": symbol, "timeframe": "1Day", "limit": limit, "feed": "iex"}
     try:
-        r = requests.get(url, headers=HEADERS, params=params)
+        r = requests.get(url, headers=HEADERS, params=params, timeout=5)
         if r.status_code != 200: return None
         data = r.json()
         bars = data.get("bars", {}).get(symbol, [])
@@ -98,6 +99,9 @@ def analyze_swing_symbol(symbol, regime):
         df['21_EMA'] = df['c'].ewm(span=21, adjust=False).mean()
         df['50_SMA'] = df['c'].rolling(window=50).mean()
         
+        # FIX 2: Replace any corrupted NaN data with 0.0 before sending to Javascript
+        df.fillna(0.0, inplace=True)
+        
         price_now = float(df["c"].iloc[-1])
         ema8 = float(df["8_EMA"].iloc[-1])
         ema21 = float(df["21_EMA"].iloc[-1])
@@ -108,7 +112,6 @@ def analyze_swing_symbol(symbol, regime):
         else:
             dates = [(datetime.now() - timedelta(days=30-i)).strftime('%Y-%m-%d') for i in range(30)]
 
-        # CRITICAL BUG FIX: Force conversion of numpy floats to standard Python floats
         spark_data = {
             "dates": dates,
             "open": [float(x) for x in df["o"].tail(30).tolist()],
@@ -155,9 +158,11 @@ def analyze_swing_symbol(symbol, regime):
 
 def engine():
     global global_state
+    # Give the server 5 seconds to boot up before the heavy lifting starts
+    time.sleep(5) 
     while True:
         try:
-            clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS)
+            clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS, timeout=5)
             clock_data = clock_req.json() if clock_req.status_code == 200 else {}
             is_open = clock_data.get("is_open", False)
             
@@ -183,7 +188,7 @@ def engine():
                     curr_p = float(p.get("current_price"))
                     if curr_p < orange_line:
                         log_event(f"EXIT: {sym} closed below 21 EMA.")
-                        requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS)
+                        requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS, timeout=5)
 
             active_list = UNIVERSE + bot["crypto_watchlist"]
             ranked_results = [analyze_swing_symbol(s, regime) for s in active_list]
@@ -199,7 +204,7 @@ def engine():
                         val = bot["base_trade_usd"] * r["multiplier"]
                         qty = round(val / r["price"], 5)
                         payload = {"symbol": r['symbol'], "qty": qty, "side": "buy", "type": "market", "time_in_force": "gtc"}
-                        requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
+                        requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload, timeout=5)
                         log_event(f"BUY: {r['symbol']} (${val:.2f})")
 
             invested = sum(float(p.get("market_value") or 0) for p in pos if p.get('symbol') != "USD")
@@ -212,7 +217,9 @@ def engine():
                 "market_regime": regime, "is_open": is_open, "next_event": clock_data.get('next_close', '')
             }
         except Exception as e:
-            log_event(f"ENGINE ERROR: {str(e)}")
+            log_event(f"NETWORK ERROR: Reconnecting...")
+        
+        # Rest for 60 seconds before scanning the market again
         time.sleep(60)
 
 threading.Thread(target=engine, daemon=True).start()
@@ -259,17 +266,23 @@ def home():
 </div>
 <div class="header">
     <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
-    <div class="pill" id="status" style="background:var(--orange)">FETCHING DATA...</div>
+    <div class="pill" id="status" style="background:var(--orange)">CONNECTING...</div>
 </div>
 <div class="grid">
     <div class="card" style="overflow-y:auto;">
         <div class="muted">Net Equity</div><div class="big" id="equity">$0.00</div>
         <div class="muted" style="margin-top:15px;">Buying Power</div><div id="cash" style="font-weight:bold; font-size:18px; margin-bottom:15px;">$0.00</div>
         <hr style="border:0; border-top:1px solid var(--border); margin:20px 0;">
-        <div class="muted" style="margin-bottom:10px;">Minervini Radar</div><div id="ranked"></div>
+        <div class="muted" style="margin-bottom:10px;">Minervini Radar</div><div id="ranked">
+            <div style="padding:15px; text-align:center; color:var(--orange); border: 1px dashed var(--border); border-radius: 8px;">
+                📡 Waking up server...<br><span style="font-size:10px; color:#a1a1aa;">This can take 60s if the cloud was asleep.</span>
+            </div>
+        </div>
     </div>
     <div style="display:flex; flex-direction:column; gap:20px;">
-        <div class="card" style="flex-grow:1; overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Live Swings</div><div id="pos-container"></div></div>
+        <div class="card" style="flex-grow:1; overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Live Swings</div><div id="pos-container">
+            <div style="text-align:center; padding:20px; color:var(--orange);">Establishing connection to broker...</div>
+        </div></div>
         <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:15px;">
                 <div><div class="muted" id="chart-title">AI Strategy X-Ray</div><div style="font-size:12px; color:#a1a1aa;">Tracking Top Target</div></div>
@@ -287,6 +300,7 @@ def home():
 <script>
     const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     
+    // Initialize TradingView Chart
     const chartOptions = {
         layout: { textColor: '#a1a1aa', background: { type: 'solid', color: 'transparent' } },
         grid: { vertLines: { color: 'rgba(31, 41, 55, 0.2)' }, horzLines: { color: 'rgba(31, 41, 55, 0.2)' } },
@@ -318,17 +332,19 @@ def home():
 
     async function fetchData() {
         try {
-            const response = await fetch('/api/data');
+            // FIX 3: Timeout to prevent Javascript hanging
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 8000);
             
-            // Handle if the Python backend is returning a 500 server error
-            if (!response.ok) {
-                throw new Error("Server returned " + response.status);
-            }
+            const response = await fetch('/api/data', { signal: controller.signal });
+            clearTimeout(timeoutId);
             
+            if (!response.ok) throw new Error("Server Error: " + response.status);
             const data = await response.json();
             
             document.getElementById("status").innerText = "LIVE SYNC";
             document.getElementById("status").style.background = "var(--green)";
+            document.getElementById("mkt").innerText = data.market_status;
             
             document.getElementById("g-state").innerText = data.bot_stats.ai_state;
             document.getElementById("g-exp").innerText = data.bot_stats.exposure;
@@ -395,7 +411,7 @@ def home():
                 }
                 rankedContainer.innerHTML = html;
             } else {
-                rankedContainer.innerHTML = '<div style="padding:15px; text-align:center; color:var(--orange); border: 1px dashed var(--border); border-radius: 8px;">📡 Sweeping Universe...</div>';
+                rankedContainer.innerHTML = '<div style="padding:15px; text-align:center; color:var(--orange); border: 1px dashed var(--border); border-radius: 8px;">📡 Engine Sweeping Universe...<br><span style="font-size:10px; color:#a1a1aa;">Analyzing Daily Moving Averages</span></div>';
             }
             
             const logsContainer = document.getElementById("logs");
@@ -407,12 +423,12 @@ def home():
             
         } catch (error) { 
             console.error("Fetch Error:", error); 
-            document.getElementById("status").innerText = "SYNC ERROR";
+            document.getElementById("status").innerText = "RECONNECTING...";
             document.getElementById("status").style.background = "var(--red)";
         }
     }
 
-    setInterval(fetchData, 3000);
+    setInterval(fetchData, 4000);
     fetchData();
 </script>
 </body>
