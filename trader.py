@@ -3,6 +3,7 @@ import time
 import threading
 import requests
 import math
+import traceback
 import pandas as pd
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
@@ -36,14 +37,14 @@ bot = {
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"]
 }
 
-activity_log = ["TradeBot Engine Online... Establishing secure connection."]
+activity_log = ["DIAGNOSTIC MODE ONLINE. Waiting for Engine..."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
     "positions": [],
     "ranked": [],
     "activity": activity_log[::-1],
-    "bot_stats": {"wins": 0, "profit": 0.0, "exposure": "0%", "ai_state": "SWINGING", "volatility": "NORMAL"},
+    "bot_stats": {"wins": 0, "profit": 0.0, "exposure": "0%", "ai_state": "BOOTING", "volatility": "TESTING"},
     "market_status": "WAITING...",
     "is_open": False,
     "next_event": "",
@@ -57,6 +58,7 @@ def log_event(msg):
     activity_log.append(full_msg)
     if len(activity_log) > 30:
         activity_log.pop(0)
+    global_state["activity"] = activity_log[::-1]
 
 def sanitize_data(obj):
     if isinstance(obj, dict): return {k: sanitize_data(v) for k, v in obj.items()}
@@ -67,29 +69,25 @@ def sanitize_data(obj):
     return obj
 
 def get_account():
-    try:
-        r = requests.get(f"{BASE_URL}/v2/account", headers=HEADERS, timeout=5)
-        return r.json() if r.status_code == 200 else {"equity": "0.00", "cash": "0.00"}
-    except: return {"equity": "0.00", "cash": "0.00"}
+    r = requests.get(f"{BASE_URL}/v2/account", headers=HEADERS, timeout=5)
+    return r.json() if r.status_code == 200 else {"equity": "0.00", "cash": "0.00"}
 
 def get_positions():
-    try:
-        r = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS, timeout=5)
-        return r.json() if r.status_code == 200 else []
-    except: return []
+    r = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS, timeout=5)
+    return r.json() if r.status_code == 200 else []
 
 def get_daily_bars(symbol, limit=100):
     is_crypto = "/" in symbol
     url = "https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/bars"
     params = {"symbols": symbol, "timeframe": "1Day", "limit": limit}
-    try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=8)
-        if r.status_code != 200: return None
-        data = r.json()
-        bars = data.get("bars", {}).get(symbol, [])
-        if not bars: return None
-        return pd.DataFrame(bars)
-    except: return None
+    r = requests.get(url, headers=HEADERS, params=params, timeout=8)
+    if r.status_code != 200: 
+        log_event(f"API ERROR on {symbol}: Status {r.status_code} - {r.text}")
+        return None
+    data = r.json()
+    bars = data.get("bars", {}).get(symbol, [])
+    if not bars: return None
+    return pd.DataFrame(bars)
 
 def analyze_swing_symbol(symbol, regime):
     try:
@@ -139,30 +137,26 @@ def analyze_swing_symbol(symbol, regime):
         
         if regime == "BULLISH": confidence += 15; reasons.append("Bullish Market")
         elif regime == "BEARISH": confidence -= 25; counter_reasons.append("Bearish Headwind")
-        elif regime == "API ERROR": confidence -= 30; counter_reasons.append("Market Regime Unreadable")
 
         confidence = max(0, min(100, confidence))
         multiplier = 1.5 if confidence >= 80 else (1.0 if confidence >= 65 else 0.0)
-        risk_lvl = "LOW" if price_now > ema21 else "HIGH"
 
         return {
             "symbol": symbol, "confidence": confidence, "reasons": reasons, 
             "counter_reasons": counter_reasons, "price": float(price_now), 
-            "multiplier": multiplier, "risk": risk_lvl, "spark": spark_data
+            "multiplier": multiplier, "risk": "LOW" if price_now > ema21 else "HIGH", "spark": spark_data
         }
     except Exception as e: 
-        return {
-            "symbol": symbol, "confidence": 0, "reasons": [], 
-            "counter_reasons": ["System Error retrieving data"], 
-            "price": 0.0, "multiplier": 0.0, "risk": "HIGH", 
-            "spark": {"dates": [], "open": [], "high": [], "low": [], "close": [], "ema8": [], "ema21": []}
-        }
+        error_msg = traceback.format_exc()
+        print(f"ANALYZE ERROR on {symbol}:\n{error_msg}")
+        return None
 
 def engine():
     global global_state
-    time.sleep(5) 
+    time.sleep(3) 
     while True:
         try:
+            log_event("Starting Engine Cycle...")
             clock_req = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS, timeout=5)
             clock_data = clock_req.json() if clock_req.status_code == 200 else {}
             is_open = clock_data.get("is_open", False)
@@ -173,60 +167,50 @@ def engine():
             equity = float(acc.get("equity") or 0)
             
             spy_df = get_daily_bars("SPY", 20)
-            regime = "API ERROR"
+            regime = "ERROR"
             if spy_df is not None and len(spy_df) > 10:
                 spy_c = float(spy_df['c'].iloc[-1])
                 spy_ema = float(spy_df['c'].ewm(span=10, adjust=False).mean().iloc[-1])
                 regime = "BULLISH" if spy_c > spy_ema else "BEARISH"
 
-            for p in pos:
-                sym = p.get('symbol')
-                if not sym or sym == "USD": continue
-                p_df = get_daily_bars(sym, 30)
-                if p_df is not None:
-                    p_df['21_EMA'] = p_df['c'].ewm(span=21, adjust=False).mean()
-                    orange_line = float(p_df['21_EMA'].iloc[-1])
-                    if float(p.get("current_price")) < orange_line:
-                        if is_open:
-                            log_event(f"EXIT: {sym} closed below 21 EMA.")
-                            requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS, timeout=5)
-                        else:
-                            log_event(f"HOLDING: {sym} is below 21 EMA, but market is closed.")
-
             active_list = UNIVERSE + bot["crypto_watchlist"]
-            ranked_results = [analyze_swing_symbol(s, regime) for s in active_list]
-            ranked = [r for r in ranked_results if r is not None]
-            ranked.sort(key=lambda x: x["confidence"], reverse=True)
-
-            log_event(f"Radar Swept {len(ranked)} targets. Regime: {regime}")
-
-            for r in ranked[:2]:
-                if r["multiplier"] > 0 and not any(p.get('symbol') == r['symbol'] for p in pos):
-                    if cash >= (bot.get("base_trade_usd") * r["multiplier"]):
-                        val = bot.get("base_trade_usd") * r["multiplier"]
-                        qty = round(val / r["price"], 5)
-                        payload = {"symbol": r['symbol'], "qty": qty, "side": "buy", "type": "market", "time_in_force": "gtc"}
-                        requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload, timeout=5)
-                        log_event(f"BUY: {r['symbol']} (${val:.2f})")
+            ranked_results = []
+            
+            for s in active_list:
+                res = analyze_swing_symbol(s, regime)
+                if res: ranked_results.append(res)
+                
+            ranked_results.sort(key=lambda x: x["confidence"], reverse=True)
+            log_event(f"Radar Swept {len(ranked_results)} targets. Regime: {regime}")
 
             invested = sum(float(p.get("market_value") or 0) for p in pos if p.get('symbol') != "USD")
             exposure = int((invested / equity) * 100) if equity > 0 else 0
 
-            global_state = {
-                "account": acc, "positions": pos, "ranked": ranked[:8], "activity": activity_log[::-1],
-                "bot_stats": {"wins": 0, "profit": 0.0, "exposure": str(exposure) + "%", "ai_state": "SWINGING", "volatility": "NORMAL"},
-                "market_status": "MARKET OPEN" if is_open else "MARKET CLOSED",
-                "market_regime": regime, "is_open": is_open, "next_event": clock_data.get('next_close', '')
-            }
+            global_state["account"] = acc
+            global_state["positions"] = pos
+            global_state["ranked"] = ranked_results[:8]
+            global_state["bot_stats"]["exposure"] = str(exposure) + "%"
+            global_state["bot_stats"]["ai_state"] = "SWINGING"
+            global_state["market_status"] = "MARKET OPEN" if is_open else "MARKET CLOSED"
+            global_state["market_regime"] = regime
+
         except Exception as e:
-            log_event(f"RECONNECTING: Waiting for fresh market data...")
-        time.sleep(60)
+            err = traceback.format_exc()
+            print(f"CRITICAL ENGINE CRASH:\n{err}")
+            log_event(f"CRITICAL ERROR: {str(e)}")
+            global_state["market_status"] = f"CRASH: {str(e)}"
+        
+        time.sleep(30)
 
 threading.Thread(target=engine, daemon=True).start()
 
 @app.route("/api/data")
 def api_data(): 
-    return jsonify(sanitize_data(global_state))
+    try:
+        return jsonify(sanitize_data(global_state))
+    except Exception as e:
+        print(f"JSON SERIALIZATION ERROR:\n{traceback.format_exc()}")
+        return jsonify({"error": "Failed to generate JSON", "details": str(e)}), 500
 
 @app.route("/")
 def home():
@@ -253,7 +237,6 @@ def home():
     .ai-btn { background:rgba(59,130,246,0.1); border:1px solid rgba(59,130,246,0.3); color:var(--blue); font-size:10px; padding:3px 6px; border-radius:4px; cursor:pointer; font-weight:bold; transition: 0.2s; }
     .ai-panel { display:none; background:rgba(0,0,0,0.3); border-left: 2px solid var(--blue); padding:10px; margin-top:8px; border-radius:0 6px 6px 0; font-size:11px; }
     .sparkline { width: 60px; height: 25px; }
-    @media (max-width: 1024px) { .grid { grid-template-columns: 1fr; height:auto; } .card { margin-bottom:15px; } }
 </style>
 </head>
 <body>
@@ -273,7 +256,7 @@ def home():
         <div class="muted" style="margin-top:15px;">Buying Power</div><div id="cash" style="font-weight:bold; font-size:18px; margin-bottom:15px;">$0.00</div>
         <hr style="border:0; border-top:1px solid var(--border); margin:20px 0;">
         <div class="muted" style="margin-bottom:10px;">Minervini Radar</div><div id="ranked">
-            <div style="padding:15px; text-align:center; color:var(--orange); border: 1px dashed var(--border); border-radius: 8px;">📡 Waking up server...</div>
+            <div style="padding:15px; text-align:center; color:var(--orange); border: 1px dashed var(--border); border-radius: 8px;">Waiting for Engine...</div>
         </div>
     </div>
     <div style="display:flex; flex-direction:column; gap:20px;">
@@ -283,15 +266,11 @@ def home():
         <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:15px;">
                 <div><div class="muted" id="chart-title">AI Strategy X-Ray</div><div style="font-size:12px; color:#a1a1aa;">Tracking Top Target</div></div>
-                <div style="display:flex; gap:10px; font-size:10px; font-weight:bold;">
-                    <span style="color:var(--blue);">8 EMA</span>
-                    <span style="color:var(--orange);">21 EMA</span>
-                </div>
             </div>
             <div style="height:180px; width:100%; position:relative;"><canvas id="xrayCanvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas></div>
         </div>
     </div>
-    <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Activity Log</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
+    <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Diagnostic Log</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
 </div>
 
 <script>
@@ -317,8 +296,7 @@ def home():
         const candleW = step * 0.6;
         function getY(price) { return h - ((price - minP) / (maxP - minP)) * h; }
 
-        ctx.strokeStyle = 'rgba(31, 41, 55, 0.4)';
-        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(31, 41, 55, 0.4)'; ctx.beginPath();
         for(let i=1; i<4; i++) { let y = i * (h/4); ctx.moveTo(0, y); ctx.lineTo(w, y); }
         ctx.stroke();
 
@@ -362,8 +340,17 @@ def home():
             const timeoutId = setTimeout(() => controller.abort(), 6000);
             const response = await fetch('/api/data', { signal: controller.signal });
             clearTimeout(timeoutId);
+            
             const data = await response.json();
             
+            // IF Python threw an error during JSON serialization
+            if (data.error) {
+                document.getElementById("status").innerText = "JSON ERROR";
+                document.getElementById("status").style.background = "var(--red)";
+                document.getElementById("logs").innerHTML = `<div style="color:red">${data.details}</div>` + document.getElementById("logs").innerHTML;
+                return;
+            }
+
             document.getElementById("status").innerText = "LIVE SYNC";
             document.getElementById("status").style.background = "var(--green)";
             
@@ -385,20 +372,16 @@ def home():
                     html += '<tr><td><b>'+p.symbol+'</b></td><td>'+formatter.format(p.avg_entry_price)+'</td><td>'+formatter.format(p.current_price)+'</td><td style="color:'+(pl >= 0 ? 'var(--green)' : 'var(--red)')+'; font-weight:bold;">'+formatter.format(pl)+'</td></tr>';
                 }
                 posContainer.innerHTML = html + '</tbody></table>';
-            } else { posContainer.innerHTML = '<div style="text-align:center; padding:20px; color:var(--orange);">Scanning for Swings...</div>'; }
+            } else { posContainer.innerHTML = '<div style="text-align:center; padding:20px; color:var(--orange);">No Swings Active. Scouting...</div>'; }
             
             const rankedContainer = document.getElementById("ranked");
             if (data.ranked && data.ranked.length > 0) {
                 let chartTarget = null;
-                for(let r of data.ranked) {
-                    if (r.spark && r.spark.close && r.spark.close.length > 0) { chartTarget = r; break; }
-                }
+                for(let r of data.ranked) { if (r.spark && r.spark.close && r.spark.close.length > 0) { chartTarget = r; break; } }
                 
                 if (chartTarget) {
                     document.getElementById("chart-title").innerText = "X-Ray: " + chartTarget.symbol;
                     drawNativeChart(chartTarget.spark);
-                } else {
-                    document.getElementById("chart-title").innerText = "X-Ray Offline";
                 }
 
                 let html = '';
@@ -417,21 +400,20 @@ def home():
                     html += '<div id="ai-'+r.symbol+'" class="ai-panel"><ul>'+reasonsHtml+'</ul></div></div>';
                 }
                 rankedContainer.innerHTML = html;
-            } else { rankedContainer.innerHTML = '<div style="padding:15px; text-align:center; color:var(--orange); border: 1px dashed var(--border); border-radius: 8px;">📡 Sweeping Universe...</div>'; }
+            } else { rankedContainer.innerHTML = '<div style="padding:15px; text-align:center; color:var(--orange); border: 1px dashed var(--border); border-radius: 8px;">📡 Waiting for Sweep...</div>'; }
             
             const logsContainer = document.getElementById("logs");
             if (data.activity && data.activity.length > 0) {
-                let html = ''; for (let a of data.activity) html += '<div style="padding:5px 0; border-bottom:1px solid #1f2937;">'+a+'</div>';
+                let html = ''; for (let a of data.activity) html += '<div style="padding:5px 0; border-bottom:1px solid #1f2937; color:' + (a.includes("ERROR") || a.includes("CRASH") ? "var(--red)" : "#a1a1aa") + ';">'+a+'</div>';
                 logsContainer.innerHTML = html;
             }
         } catch (error) { 
-            console.error("Fetch Error:", error); 
-            document.getElementById("status").innerText = "RECONNECTING...";
+            document.getElementById("status").innerText = "UI ERROR / RECONNECTING";
             document.getElementById("status").style.background = "var(--red)";
         }
     }
 
-    setInterval(fetchData, 4000);
+    setInterval(fetchData, 3000);
     fetchData();
 </script>
 </body>
