@@ -34,10 +34,10 @@ bot = {
     "running": True,
     "watchlist": [], 
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"],
-    "base_trade_usd": 25.00, # Swing positions usually carry slightly more weight
+    "base_trade_usd": 25.00, 
     "last_scan_date": "",
-    "risk_pct": 5.0,    # Default fallback risk
-    "reward_pct": 15.0, # Target for swing cycles
+    "risk_pct": 5.0,    
+    "reward_pct": 15.0, 
     "wins": 0,
     "total_profit": 0.0,
     "kill_switch_active": False,
@@ -45,8 +45,7 @@ bot = {
 }
 
 trailing_stops = {} 
-position_metadata = {} 
-activity_log = ["System Reset... Swing Engine Online"]
+activity_log = ["System Initialized... TradeBot Engine Online"]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
@@ -65,7 +64,7 @@ def log_event(msg):
     full_msg = f"[{timestamp}] {msg}"
     print(full_msg)
     activity_log.append(full_msg)
-    if len(activity_log) > 40:
+    if len(activity_log) > 30:
         activity_log.pop(0)
 
 def get_account():
@@ -80,9 +79,6 @@ def get_positions():
         return r.json() if r.status_code == 200 else []
     except: return []
 
-# ---------------------------------------------------------
-# DATA FETCHING: Switched to 1Day Bars for Swing Trading
-# ---------------------------------------------------------
 def get_daily_bars(symbol, limit=100):
     is_crypto = "/" in symbol
     url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/{symbol}/bars"
@@ -100,7 +96,6 @@ def analyze_swing_symbol(symbol, regime):
         df = get_daily_bars(symbol, 100)
         if df is None or len(df) < 50: return None
         
-        # Minervini Indicators
         df['8_EMA'] = df['c'].ewm(span=8, adjust=False).mean()
         df['21_EMA'] = df['c'].ewm(span=21, adjust=False).mean()
         df['50_SMA'] = df['c'].rolling(window=50).mean()
@@ -116,31 +111,26 @@ def analyze_swing_symbol(symbol, regime):
         reasons = []
         counter_reasons = []
 
-        # Logic 1: The Trend Template
         if price_now > sma50:
             confidence += 20; reasons.append("📈 Above 50-Day Line")
         else:
             confidence -= 20; counter_reasons.append("📉 Below 50-Day Line")
 
-        # Logic 2: EMA Crossover (Minervini Core)
         if ema8 > ema21:
-            confidence += 20; reasons.append("🔥 8 EMA > 21 EMA (Momentum Up)")
+            confidence += 20; reasons.append("🔥 8 EMA > 21 EMA (Uptrend)")
         else:
-            confidence -= 15; counter_reasons.append("💤 Weak Momentum (No Cross)")
+            confidence -= 15; counter_reasons.append("💤 Weak Momentum")
 
-        # Logic 3: Entry Trigger
         if price_now > ema8:
-            confidence += 10; reasons.append("🚀 Price holding 8 EMA")
+            confidence += 10; reasons.append("🚀 Leading Blue Line")
         
-        # Logic 4: Market Regime
         if regime == "BULLISH":
-            confidence += 15; reasons.append("🌊 Favorable Market Regime")
+            confidence += 15; reasons.append("🌊 Favorable Market")
         elif regime == "BEARISH":
-            confidence -= 25; counter_reasons.append("🩸 Bearish Regime Headwind")
+            confidence -= 25; counter_reasons.append("🩸 Bearish Headwind")
 
         confidence = max(0, min(100, confidence))
         multiplier = 1.5 if confidence >= 80 else (1.0 if confidence >= 65 else 0.0)
-        
         risk_lvl = "LOW" if price_now > ema21 else "HIGH"
 
         return {
@@ -163,7 +153,6 @@ def engine():
             cash = float(acc.get("cash") or 0)
             equity = float(acc.get("equity") or 0)
             
-            # Regime Detection (SPY vs 10 EMA)
             spy_df = get_daily_bars("SPY", 20)
             regime = "CHOP"
             if spy_df is not None:
@@ -171,23 +160,18 @@ def engine():
                 spy_ema = spy_df['c'].ewm(span=10, adjust=False).mean().iloc[-1]
                 regime = "BULLISH" if spy_c > spy_ema else "BEARISH"
 
-            # Manage Positions (Swing Rules)
             for p in pos:
                 sym = p.get('symbol')
                 if not sym or sym == "USD": continue
-                
-                # Close below Orange Line (21 EMA)
                 p_df = get_daily_bars(sym, 30)
                 if p_df is not None:
                     p_df['21_EMA'] = p_df['c'].ewm(span=21, adjust=False).mean()
                     orange_line = float(p_df['21_EMA'].iloc[-1])
                     curr_p = float(p.get("current_price"))
-                    
                     if curr_p < orange_line:
                         log_event(f"🛡️ SWING EXIT: {sym} closed below 21 EMA.")
                         requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS)
 
-            # Execution
             active_list = UNIVERSE + bot["crypto_watchlist"]
             ranked = [analyze_swing_symbol(s, regime) for s in active_list]
             ranked = [r for r in ranked if r is not None]
@@ -202,7 +186,6 @@ def engine():
                         requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload)
                         log_event(f"🚀 SWING BUY: {r['symbol']} (${val:.2f})")
 
-            # Final State update
             invested = sum(float(p.get("market_value") or 0) for p in pos if p.get('symbol') != "USD")
             exposure = int((invested / equity) * 100) if equity > 0 else 0
 
@@ -214,7 +197,7 @@ def engine():
             }
         except Exception as e:
             log_event(f"ENGINE ERROR: {str(e)}")
-        time.sleep(60) # Slowed engine for daily analysis
+        time.sleep(60)
 
 threading.Thread(target=engine, daemon=True).start()
 
@@ -229,7 +212,7 @@ def home():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>QuantumPro Terminal</title>
+<title>TradeBot Terminal</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
     :root { --bg: #0b1220; --card: #111827; --border: #1f2937; --text: #e5e7eb; --green: #22c55e; --yellow: #eab308; --red: #ef4444; --orange: #f59e0b; --blue: #3b82f6; }
@@ -259,7 +242,7 @@ def home():
     <div><span id="regime" style="color:var(--orange);">REGIME: SCANNING</span></div>
 </div>
 <div class="header">
-    <div><span style="font-weight:900; font-size:18px;">QUANTUM<span style="color:var(--green)">PRO</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
+    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
     <div class="pill" id="status" style="background:var(--orange)">FETCHING DATA...</div>
 </div>
 <div class="grid">
@@ -293,53 +276,70 @@ def home():
     function createSparkline(dataArray, color) {
         if(!dataArray || dataArray.length === 0) return '';
         const max = Math.max(...dataArray), min = Math.min(...dataArray), range = (max - min) || 1;
-        const pts = dataArray.map((val, i) => `${(i/(dataArray.length-1))*60},${25 - ((val-min)/range)*25}`).join(" ");
-        return `<svg class="sparkline" style="stroke:${color}; fill:none; stroke-width:1.5px;"><polyline points="${pts}"/></svg>`;
+        const pts = dataArray.map((val, i) => (i/(dataArray.length-1)*60) + ',' + (25 - ((val-min)/range)*25)).join(" ");
+        return '<svg class="sparkline" style="stroke:'+color+'; fill:none; stroke-width:1.5px;"><polyline points="'+pts+'"/></svg>';
     }
     async function fetchBotData() {
         try {
-            const response = await fetch('/api/data'); const d = await response.json();
-            document.getElementById("status").innerText = "LIVE SYNC"; document.getElementById("status").style.background = "var(--green)";
+            const response = await fetch('/api/data');
+            const d = await response.json();
+            document.getElementById("status").innerText = "LIVE SYNC";
+            document.getElementById("status").style.background = "var(--green)";
             document.getElementById("g-state").innerText = d.bot_stats.ai_state;
             document.getElementById("g-exp").innerText = d.bot_stats.exposure;
             document.getElementById("g-vol").innerText = d.bot_stats.volatility;
             document.getElementById("regime").innerText = "REGIME: " + d.market_regime;
             document.getElementById("regime").style.color = d.market_regime.includes("BULLISH") ? "var(--green)" : "var(--red)";
-            let curE = parseFloat(d.account.equity || 0); document.getElementById("equity").innerText = f.format(curE);
+            let curE = parseFloat(d.account.equity || 0);
+            document.getElementById("equity").innerText = f.format(curE);
             document.getElementById("cash").innerText = f.format(d.account.cash);
-            document.getElementById("winrate").innerText = d.bot_stats.wins; document.getElementById("profit").innerText = f.format(d.bot_stats.profit);
+            document.getElementById("winrate").innerText = d.bot_stats.wins;
+            document.getElementById("profit").innerText = f.format(d.bot_stats.profit);
             if (curE > 0) {
-                const now = new Date(); eqChart.data.labels.push(now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0'));
-                eqChart.data.datasets[0].data.push(curE); if(eqChart.data.labels.length > 30) { eqChart.data.labels.shift(); eqChart.data.datasets[0].data.shift(); }
+                const now = new Date();
+                eqChart.data.labels.push(now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0'));
+                eqChart.data.datasets[0].data.push(curE);
+                if(eqChart.data.labels.length > 30) { eqChart.data.labels.shift(); eqChart.data.datasets[0].data.shift(); }
                 eqChart.update();
             }
             const posC = document.getElementById("pos-container");
             if (d.positions && d.positions.length > 0) {
-                posC.innerHTML = `<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Trailing Stop</th></tr></thead><tbody>\${d.positions.map(p => {
+                let html = '<table><thead><tr><th>Asset</th><th>Entry</th><th>Current</th><th>P/L</th><th>Trailing Stop</th></tr></thead><tbody>';
+                d.positions.forEach(p => {
                     const pl = parseFloat(p.unrealized_intraday_pl);
-                    return \`<tr><td><b>\${p.symbol}</b><br><span style="font-size:10px;">\${p.qty} shs</span></td><td>\${f.format(p.avg_entry_price)}</td><td>\${f.format(p.current_price)}</td><td style="color:\${pl >= 0 ? 'var(--green)' : 'var(--red)'}; font-weight:bold;">\${f.format(pl)}</td><td><span class="status-badge" style="background:rgba(59,130,246,0.1); color:var(--blue);">MINERVINI ORANGE LINE ON</span></td></tr>\`;
-                }).join("")}</tbody></table>`;
-            } else { posC.innerHTML = `<div class="countdown-box"><div class="muted">No Active Swings</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div></div>`; }
-            if (d.ranked) {
-                document.getElementById("ranked").innerHTML = d.ranked.map(r => {
-                    let confC = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
-                    return \`<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;">
-                        <div style="display:flex; justify-content:space-between; align-items:center;">
-                            <div style="display:flex; gap:10px; align-items:center;"><b>\${r.symbol}</b>\${createSparkline(r.spark, confC)}</div>
-                            <div style="font-weight:bold; color:\${confC}; font-size:12px;">\${r.confidence}%</div>
-                        </div>
-                        <div style="margin-top:8px;"><span class="ai-btn" onclick="toggleAI('\${r.symbol}')">📊 Breakdown ▾</span></div>
-                        <div id="ai-\${r.symbol}" class="ai-panel">
-                            <div style="color:var(--blue); font-weight:bold; margin-bottom:5px;">Reasons:</div>
-                            <ul style="padding-left:15px; color:#a1a1aa;">\${r.reasons.map(res => \`<li>\${res}</li>\`).join('')}\${r.counter_reasons.map(c => \`<li style="color:var(--orange)">\${c}</li>\`).join('')}</ul>
-                        </div>
-                    </div>\`;
-                }).join("");
+                    html += '<tr><td><b>'+p.symbol+'</b><br><span style="font-size:10px;">'+p.qty+' shs</span></td><td>'+f.format(p.avg_entry_price)+'</td><td>'+f.format(p.current_price)+'</td><td style="color:'+(pl >= 0 ? 'var(--green)' : 'var(--red)')+'; font-weight:bold;">'+f.format(pl)+'</td><td><span class="status-badge" style="background:rgba(59,130,246,0.1); color:var(--blue);">MINERVINI ORANGE LINE ON</span></td></tr>';
+                });
+                html += '</tbody></table>';
+                posC.innerHTML = html;
+            } else {
+                posC.innerHTML = '<div class="countdown-box"><div class="muted">No Active Swings</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Hunting for Breakouts...</div></div>';
             }
-            document.getElementById("logs").innerHTML = d.activity.map(a => `<div style="padding:5px 0; border-bottom:1px solid #1f2937;">\${a}</div>`).join("");
-        } catch (e) {}
+            if (d.ranked) {
+                let html = '';
+                d.ranked.forEach(r => {
+                    let confC = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
+                    html += '<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;">' +
+                        '<div style="display:flex; justify-content:space-between; align-items:center;">' +
+                        '<div style="display:flex; gap:10px; align-items:center;"><b>'+r.symbol+'</b>'+createSparkline(r.spark, confC)+'</div>' +
+                        '<div style="font-weight:bold; color:'+confC+'; font-size:12px;">'+r.confidence+'%</div>' +
+                        '</div>' +
+                        '<div style="margin-top:8px;"><span class="ai-btn" onclick="toggleAI(\''+r.symbol+'\')">📊 Breakdown ▾</span></div>' +
+                        '<div id="ai-'+r.symbol+'" class="ai-panel">' +
+                        '<div style="color:var(--blue); font-weight:bold; margin-bottom:5px;">Reasons:</div>' +
+                        '<ul style="padding-left:15px; color:#a1a1aa;">' +
+                        r.reasons.map(res => '<li>'+res+'</li>').join('') +
+                        r.counter_reasons.map(c => '<li style="color:var(--orange)">'+c+'</li>').join('') +
+                        '</ul></div></div>';
+                });
+                document.getElementById("ranked").innerHTML = html;
+            }
+            document.getElementById("logs").innerHTML = d.activity.map(a => '<div style="padding:5px 0; border-bottom:1px solid #1f2937;">'+a+'</div>').join("");
+        } catch (e) {
+            console.error(e);
+        }
     }
-    setInterval(fetchBotData, 3000); fetchBotData();
+    setInterval(fetchBotData, 3000);
+    fetchBotData();
 </script>
 </body>
 </html>
