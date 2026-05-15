@@ -34,10 +34,12 @@ UNIVERSE = [
 bot = {
     "running": True,
     "base_trade_usd": 25.00,
+    "wins": 0,
+    "total_profit": 0.0,
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"]
 }
 
-activity_log = ["TradeBot Engine v7.2 Online... Waiting for engine."]
+activity_log = ["TradeBot Engine v8.0 Online... Visuals Restored."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
@@ -101,11 +103,13 @@ def analyze_swing_symbol(symbol, regime):
     try:
         df, error_msg = get_daily_bars(symbol, 100)
         
+        # Fallback if API blocks us
         if df is None or len(df) < 20: 
             return {
                 "symbol": symbol, "confidence": 0, "reasons": [], 
                 "counter_reasons": [f"API ERROR: {error_msg}"], 
-                "price": 0.0, "multiplier": 0.0, "risk": "HIGH"
+                "price": 0.0, "multiplier": 0.0, "risk": "HIGH",
+                "spark": {"dates": [], "open": [], "high": [], "low": [], "close": [], "ema8": [], "ema21": []}
             }
         
         df['8_EMA'] = df['c'].ewm(span=8, adjust=False).mean()
@@ -148,13 +152,19 @@ def analyze_swing_symbol(symbol, regime):
         confidence = max(0, min(100, confidence))
         multiplier = 1.5 if confidence >= 80 else (1.0 if confidence >= 65 else 0.0)
 
+        # THE MISSING PIECE: Appending spark_data back into the return dictionary
         return {
             "symbol": symbol, "confidence": confidence, "reasons": reasons, 
             "counter_reasons": counter_reasons, "price": float(price_now), 
-            "multiplier": multiplier, "risk": "LOW" if price_now > ema21 else "HIGH", "spark": spark_data
+            "multiplier": multiplier, "risk": "LOW" if price_now > ema21 else "HIGH",
+            "spark": spark_data 
         }
     except Exception as e: 
-        return {"symbol": symbol, "confidence": 0, "reasons": [], "counter_reasons": [f"Crash: {str(e)}"], "price": 0.0, "multiplier": 0.0, "risk": "HIGH", "spark": {}}
+        return {
+            "symbol": symbol, "confidence": 0, "reasons": [], "counter_reasons": [f"Crash: {str(e)}"], 
+            "price": 0.0, "multiplier": 0.0, "risk": "HIGH",
+            "spark": {"dates": [], "open": [], "high": [], "low": [], "close": [], "ema8": [], "ema21": []}
+        }
 
 def engine():
     global global_state
@@ -204,6 +214,8 @@ def engine():
             global_state["ranked"] = ranked_results[:8]
             global_state["bot_stats"]["exposure"] = str(exposure) + "%"
             global_state["bot_stats"]["ai_state"] = "SWINGING"
+            global_state["bot_stats"]["wins"] = bot.get("wins", 0)
+            global_state["bot_stats"]["profit"] = bot.get("total_profit", 0.0)
             global_state["market_status"] = "MARKET OPEN" if is_open else "MARKET CLOSED"
             global_state["market_regime"] = regime
 
@@ -256,7 +268,7 @@ def home():
     <div><span id="regime" style="color:var(--orange);">REGIME: SCANNING</span></div>
 </div>
 <div class="header">
-    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v7.2</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
+    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v8.0</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
     <div class="pill" id="status" style="background:var(--orange)">CONNECTING...</div>
 </div>
 <div class="grid">
@@ -275,6 +287,10 @@ def home():
         <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:15px;">
                 <div><div class="muted" id="chart-title">AI Strategy X-Ray</div><div style="font-size:12px; color:#a1a1aa;">Tracking Top Target</div></div>
+                <div style="display:flex; gap:10px; font-size:10px; font-weight:bold;">
+                    <span style="color:var(--blue);">8 EMA</span>
+                    <span style="color:var(--orange);">21 EMA</span>
+                </div>
             </div>
             <div style="height:180px; width:100%; position:relative;"><canvas id="xrayCanvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas></div>
         </div>
@@ -284,6 +300,66 @@ def home():
 
 <script>
     document.getElementById("logs").innerHTML = "<div style='color:var(--green); padding:5px 0;'>[UI] Interface loaded. Requesting data...</div>";
+
+    const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+
+    function drawNativeChart(data) {
+        const canvas = document.getElementById('xrayCanvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const rect = canvas.parentElement.getBoundingClientRect();
+        canvas.width = rect.width; canvas.height = rect.height;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        if (!data || !data.close || data.close.length === 0) return;
+        const w = canvas.width, h = canvas.height, len = data.close.length;
+        
+        let minP = Math.min.apply(null, data.low.concat(data.ema8, data.ema21));
+        let maxP = Math.max.apply(null, data.high.concat(data.ema8, data.ema21));
+        const pad = (maxP - minP) * 0.1 || 1;
+        minP -= pad; maxP += pad;
+
+        const step = w / len;
+        const candleW = step * 0.6;
+        function getY(price) { return h - ((price - minP) / (maxP - minP)) * h; }
+
+        ctx.strokeStyle = 'rgba(31, 41, 55, 0.4)'; ctx.beginPath();
+        for(let i=1; i<4; i++) { let y = i * (h/4); ctx.moveTo(0, y); ctx.lineTo(w, y); }
+        ctx.stroke();
+
+        for(let i=0; i<len; i++) {
+            const x = i * step + step/2, o = data.open[i], c = data.close[i], hi = data.high[i], lo = data.low[i];
+            const isGreen = c >= o;
+            ctx.strokeStyle = isGreen ? '#22c55e' : '#ef4444';
+            ctx.fillStyle = isGreen ? '#22c55e' : '#ef4444';
+            ctx.beginPath(); ctx.moveTo(x, getY(hi)); ctx.lineTo(x, getY(lo)); ctx.stroke();
+            const bTop = getY(Math.max(o, c)), bBot = getY(Math.min(o, c)), bHeight = Math.max(1, bBot - bTop);
+            ctx.fillRect(x - candleW/2, bTop, candleW, bHeight);
+        }
+
+        ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 2; ctx.beginPath();
+        for(let i=0; i<len; i++) { const x = i * step + step/2, y = getY(data.ema21[i]); if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+        ctx.stroke();
+
+        ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 2; ctx.beginPath();
+        for(let i=0; i<len; i++) { const x = i * step + step/2, y = getY(data.ema8[i]); if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+        ctx.stroke();
+    }
+
+    function togglePanel(id) {
+        const panel = document.getElementById(id);
+        panel.style.display = (panel.style.display === 'none' || panel.style.display === '') ? 'block' : 'none';
+    }
+
+    function createSparkline(dataArray, color) {
+        try {
+            if(!dataArray || dataArray.length === 0) return '';
+            const max = Math.max.apply(null, dataArray), min = Math.min.apply(null, dataArray), range = (max - min) || 1;
+            let pts = "";
+            for(let i=0; i<dataArray.length; i++) pts += (i/(dataArray.length-1)*60) + ',' + (25 - ((dataArray[i]-min)/range)*25) + ' ';
+            return '<svg class="sparkline" style="stroke:'+color+'; fill:none; stroke-width:1.5px;"><polyline points="'+pts+'"/></svg>';
+        } catch(e) { return ''; }
+    }
 
     function updateDashboard() {
         var xhr = new XMLHttpRequest();
@@ -327,6 +403,17 @@ def home():
                     
                     var rankHtml = "";
                     if (data.ranked && data.ranked.length > 0) {
+                        
+                        let chartTarget = null;
+                        for(let i=0; i<data.ranked.length; i++) { 
+                            if (data.ranked[i].spark && data.ranked[i].spark.close && data.ranked[i].spark.close.length > 0) { chartTarget = data.ranked[i]; break; } 
+                        }
+                        
+                        if (chartTarget) {
+                            document.getElementById("chart-title").innerText = "X-Ray: " + chartTarget.symbol;
+                            drawNativeChart(chartTarget.spark);
+                        }
+                        
                         for (var j = 0; j < data.ranked.length; j++) {
                             var r = data.ranked[j];
                             var rColor = r.confidence >= 80 ? "var(--green)" : (r.confidence >= 65 ? "var(--yellow)" : "var(--red)");
@@ -340,9 +427,15 @@ def home():
                             
                             rankHtml += "<div style='margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;'>";
                             rankHtml += "<div style='display:flex; justify-content:space-between;'>";
-                            rankHtml += "<div><b>" + r.symbol + "</b><br><span style='font-size:10px; color:#a1a1aa;'>$" + parseFloat(r.price).toFixed(2) + "</span></div>";
+                            rankHtml += "<div><div style='display:flex; gap:10px; align-items:center;'><b>" + r.symbol + "</b>" + createSparkline(r.spark.close, rColor) + "</div><span style='font-size:10px; color:#a1a1aa;'>$" + parseFloat(r.price).toFixed(2) + "</span></div>";
                             rankHtml += "<div style='text-align:right;'><b style='color:" + rColor + ";'>" + r.confidence + "%</b><br><span style='font-size:9px; color:" + rColor + ";'>" + stat + "</span></div>";
-                            rankHtml += "</div></div>";
+                            rankHtml += "</div><div style='margin-top:8px;'>";
+                            rankHtml += "<span class='ai-btn' onclick='togglePanel(\"ai-" + r.symbol + "\")'>Breakdown ▾</span></div>";
+                            
+                            var reasonsHtml = "";
+                            if (r.reasons) { for (var x=0; x<r.reasons.length; x++) reasonsHtml += "<li>"+r.reasons[x]+"</li>"; }
+                            if (r.counter_reasons) { for (var y=0; y<r.counter_reasons.length; y++) reasonsHtml += "<li style='color:var(--orange)'>"+r.counter_reasons[y]+"</li>"; }
+                            rankHtml += "<div id='ai-"+r.symbol+"' class='ai-panel'><ul>"+reasonsHtml+"</ul></div></div>";
                         }
                     } else {
                         rankHtml = "<div style='text-align:center; padding:15px; color:var(--orange);'>Sweeping Universe...</div>";
