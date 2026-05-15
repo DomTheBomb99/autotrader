@@ -77,15 +77,19 @@ def get_positions():
         return r.json() if r.status_code == 200 else []
     except: return []
 
+# ---------------------------------------------------------
+# THE BUG FIX: Properly reading the Alpaca JSON format
+# ---------------------------------------------------------
 def get_daily_bars(symbol, limit=100):
     is_crypto = "/" in symbol
-    url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/{symbol}/bars"
-    params = {"symbols": symbol, "timeframe": "1Day", "limit": limit} if is_crypto else {"timeframe": "1Day", "limit": limit, "feed": "iex"}
+    url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/bars"
+    params = {"symbols": symbol, "timeframe": "1Day", "limit": limit} if is_crypto else {"symbols": symbol, "timeframe": "1Day", "limit": limit, "feed": "iex"}
     try:
         r = requests.get(url, headers=HEADERS, params=params)
         if r.status_code != 200: return None
         data = r.json()
-        bars = data.get("bars", {}).get(symbol, []) if is_crypto else data.get("bars", [])
+        # FIX: Always extract from the dictionary key matching the symbol
+        bars = data.get("bars", {}).get(symbol, [])
         return pd.DataFrame(bars) if len(bars) > 0 else None
     except: return None
 
@@ -103,8 +107,7 @@ def analyze_swing_symbol(symbol, regime):
         ema21 = float(df["21_EMA"].iloc[-1])
         sma50 = float(df["50_SMA"].iloc[-1])
         
-        # Package OHLC data for Candlesticks
-        # Generate clean date strings for TradingView (YYYY-MM-DD)
+        # Package OHLC data for TradingView Candlesticks
         if "t" in df:
             dates = [str(t)[:10] for t in df["t"].tail(30).tolist()]
         else:
@@ -151,7 +154,8 @@ def analyze_swing_symbol(symbol, regime):
             "counter_reasons": counter_reasons, "price": price_now, 
             "multiplier": multiplier, "risk": risk_lvl, "spark": spark_data
         }
-    except: return None
+    except Exception as e: 
+        return None
 
 def engine():
     global global_state
@@ -191,7 +195,7 @@ def engine():
             ranked.sort(key=lambda x: x["confidence"], reverse=True)
 
             if len(ranked) > 0:
-                log_event(f"📡 Radar Swept. Top Watch: {ranked[0]['symbol']} ({ranked[0]['confidence']}%)")
+                log_event(f"📡 Radar Swept {len(ranked)} targets. Top Watch: {ranked[0]['symbol']}")
 
             for r in ranked[:2]:
                 if r["multiplier"] > 0 and not any(p.get('symbol') == r['symbol'] for p in pos):
@@ -212,7 +216,7 @@ def engine():
                 "market_regime": regime, "is_open": is_open, "next_event": clock_data.get('next_close', '')
             }
         except Exception as e:
-            log_event(f"ERROR: {str(e)}")
+            log_event(f"ENGINE ERROR: {str(e)}")
         time.sleep(60)
 
 threading.Thread(target=engine, daemon=True).start()
@@ -265,7 +269,7 @@ def home():
         <div class="muted">Net Equity</div><div class="big" id="equity">$0.00</div>
         <div class="muted" style="margin-top:15px;">Buying Power</div><div id="cash" style="font-weight:bold; font-size:18px; margin-bottom:15px;">$0.00</div>
         <hr style="border:0; border-top:1px solid var(--border); margin:20px 0;">
-        <div class="muted" style="margin-bottom:10px;">Active Radar (Top 8)</div><div id="ranked"></div>
+        <div class="muted" style="margin-bottom:10px;">Minervini Radar</div><div id="ranked"></div>
     </div>
     <div style="display:flex; flex-direction:column; gap:20px;">
         <div class="card" style="flex-grow:1; overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Live Swings</div><div id="pos-container"></div></div>
@@ -289,25 +293,17 @@ def home():
     // Initialize TradingView Chart
     const chartOptions = {
         layout: { textColor: '#a1a1aa', background: { type: 'solid', color: 'transparent' } },
-        grid: { vertLines: { color: 'rgba(31, 41, 55, 0.5)' }, horzLines: { color: 'rgba(31, 41, 55, 0.5)' } },
+        grid: { vertLines: { color: 'rgba(31, 41, 55, 0.2)' }, horzLines: { color: 'rgba(31, 41, 55, 0.2)' } },
         timeScale: { timeVisible: false, borderColor: '#1f2937' },
         rightPriceScale: { borderColor: '#1f2937' }
     };
-    
     const chart = LightweightCharts.createChart(document.getElementById('xrayChart'), chartOptions);
     
-    // Create Series: Candlesticks + 2 Lines
-    const candleSeries = chart.addCandlestickSeries({
-        upColor: '#22c55e', downColor: '#ef4444', borderVisible: false,
-        wickUpColor: '#22c55e', wickDownColor: '#ef4444'
-    });
+    const candleSeries = chart.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444' });
     const ema8Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 2, crosshairMarkerVisible: false });
     const ema21Series = chart.addLineSeries({ color: '#f59e0b', lineWidth: 2, crosshairMarkerVisible: false });
 
-    // Handle Resize
-    window.addEventListener('resize', () => {
-        chart.resize(document.getElementById('xrayChart').clientWidth, 180);
-    });
+    window.addEventListener('resize', () => { chart.resize(document.getElementById('xrayChart').clientWidth, 180); });
 
     function togglePanel(id) {
         const panel = document.getElementById(id);
@@ -331,6 +327,7 @@ def home():
             
             document.getElementById("status").innerText = "LIVE SYNC";
             document.getElementById("status").style.background = "var(--green)";
+            document.getElementById("mkt").innerText = data.market_status;
             
             document.getElementById("g-state").innerText = data.bot_stats.ai_state;
             document.getElementById("g-exp").innerText = data.bot_stats.exposure;
@@ -344,7 +341,6 @@ def home():
             document.getElementById("equity").innerText = formatter.format(eq);
             document.getElementById("cash").innerText = formatter.format(data.account.cash);
             
-            // Live Swings
             const posContainer = document.getElementById("pos-container");
             if (data.positions && data.positions.length > 0) {
                 let html = '<table><thead><tr><th>Asset</th><th>Entry</th><th>Price</th><th>P/L</th></tr></thead><tbody>';
@@ -359,35 +355,26 @@ def home():
                 posContainer.innerHTML = '<div style="text-align:center; padding:20px; color:var(--orange);">No Swings Active. Scouting for Setups...</div>';
             }
             
-            // Active Radar & TradingView Update
             const rankedContainer = document.getElementById("ranked");
             if (data.ranked && data.ranked.length > 0) {
                 
-                // --- UPDATE TRADINGVIEW CHART WITH OHLC DATA ---
+                // Update TradingView Chart
                 const topTarget = data.ranked[0];
                 document.getElementById("chart-title").innerText = "X-Ray: " + topTarget.symbol;
-                
                 if(topTarget.spark && topTarget.spark.dates.length > 0) {
-                    // Format data for Lightweight Charts
-                    const ohlcData = [];
-                    const ema8Data = [];
-                    const ema21Data = [];
-                    
+                    const ohlcData = []; const ema8Data = []; const ema21Data = [];
                     for(let i=0; i<topTarget.spark.dates.length; i++) {
                         const dateStr = topTarget.spark.dates[i];
                         ohlcData.push({ time: dateStr, open: topTarget.spark.open[i], high: topTarget.spark.high[i], low: topTarget.spark.low[i], close: topTarget.spark.close[i] });
                         ema8Data.push({ time: dateStr, value: topTarget.spark.ema8[i] });
                         ema21Data.push({ time: dateStr, value: topTarget.spark.ema21[i] });
                     }
-                    
-                    // Inject data into the 3 series
                     candleSeries.setData(ohlcData);
                     ema8Series.setData(ema8Data);
                     ema21Series.setData(ema21Data);
                     chart.timeScale().fitContent();
                 }
 
-                // Render Sidebar
                 let html = '';
                 for (let r of data.ranked) {
                     const color = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
@@ -411,7 +398,6 @@ def home():
                 rankedContainer.innerHTML = '<div style="padding:15px; text-align:center; color:var(--orange); border: 1px dashed var(--border); border-radius: 8px;">📡 Sweeping Universe...</div>';
             }
             
-            // Logs
             const logsContainer = document.getElementById("logs");
             if (data.activity && data.activity.length > 0) {
                 let html = '';
@@ -419,9 +405,7 @@ def home():
                 logsContainer.innerHTML = html;
             }
             
-        } catch (error) {
-            console.error("Fetch Error:", error);
-        }
+        } catch (error) { console.error("Fetch Error:", error); }
     }
 
     setInterval(fetchData, 3000);
@@ -429,3 +413,7 @@ def home():
 </script>
 </body>
 </html>
+"""
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT, threaded=True)
