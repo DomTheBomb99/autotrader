@@ -37,7 +37,7 @@ bot = {
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"]
 }
 
-activity_log = ["TradeBot Engine v7.0 Online... Safe Mode Engaged."]
+activity_log = ["TradeBot Engine v7.1 Online... Typo Squashed."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
@@ -175,7 +175,8 @@ def engine():
             ranked_results.sort(key=lambda x: x["confidence"], reverse=True)
             log_event(f"Radar Swept {len(ranked_results)} targets. Regime: {regime}")
 
-            for r in ranked[:2]:
+            # >>> THE FIX IS RIGHT HERE. Changed `ranked` to `ranked_results` <<<
+            for r in ranked_results[:2]:
                 if r["multiplier"] > 0 and not any(p.get('symbol') == r['symbol'] for p in pos):
                     if cash >= (bot.get("base_trade_usd") * r["multiplier"]):
                         val = bot.get("base_trade_usd") * r["multiplier"]
@@ -231,6 +232,9 @@ def home():
     th { color:#9ca3af; padding-bottom:12px; border-bottom:1px solid var(--border); font-size:11px; text-transform:uppercase; }
     td { padding:12px 0; border-bottom:1px solid var(--border); }
     .pill { background:#4b5563; color:#fff; padding:4px 10px; border-radius:20px; font-size:11px; font-weight:900; }
+    .ai-btn { background:rgba(59,130,246,0.1); border:1px solid rgba(59,130,246,0.3); color:var(--blue); font-size:10px; padding:3px 6px; border-radius:4px; cursor:pointer; font-weight:bold; transition: 0.2s; }
+    .ai-panel { display:none; background:rgba(0,0,0,0.3); border-left: 2px solid var(--blue); padding:10px; margin-top:8px; border-radius:0 6px 6px 0; font-size:11px; }
+    .sparkline { width: 60px; height: 25px; }
 </style>
 </head>
 <body>
@@ -241,7 +245,7 @@ def home():
     <div><span id="regime" style="color:var(--orange);">REGIME: SCANNING</span></div>
 </div>
 <div class="header">
-    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v7.0 (SAFE MODE)</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
+    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v7.1</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
     <div class="pill" id="status" style="background:var(--orange)">CONNECTING...</div>
 </div>
 <div class="grid">
@@ -262,8 +266,7 @@ def home():
 </div>
 
 <script>
-    // BARE METAL ES5 JAVASCRIPT - NO FANCY SYNTAX, NO CANVAS
-    document.getElementById("logs").innerHTML = "<div style='color:var(--green); padding:5px 0;'>[UI] Safe Mode Interface loaded. Requesting data...</div>";
+    document.getElementById("logs").innerHTML = "<div style='color:var(--green); padding:5px 0;'>[UI] Interface loaded. Requesting data...</div>";
 
     function updateDashboard() {
         var xhr = new XMLHttpRequest();
@@ -290,7 +293,6 @@ def home():
                     document.getElementById("equity").innerText = "$" + eq.toFixed(2);
                     document.getElementById("cash").innerText = "$" + ca.toFixed(2);
                     
-                    // Positions
                     var posHtml = "";
                     if (data.positions && data.positions.length > 0) {
                         posHtml += '<table><thead><tr><th>Asset</th><th>Entry</th><th>Price</th><th>P/L</th></tr></thead><tbody>';
@@ -306,7 +308,6 @@ def home():
                     }
                     document.getElementById("pos-container").innerHTML = posHtml;
                     
-                    // Radar
                     var rankHtml = "";
                     if (data.ranked && data.ranked.length > 0) {
                         for (var j = 0; j < data.ranked.length; j++) {
@@ -326,7 +327,6 @@ def home():
                     }
                     document.getElementById("ranked").innerHTML = rankHtml;
                     
-                    // Logs
                     var logHtml = "";
                     if (data.activity && data.activity.length > 0) {
                         for (var k = 0; k < data.activity.length; k++) {
@@ -364,7 +364,3 @@ def home():
 </script>
 </body>
 </html>
-"""
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, threaded=True)
