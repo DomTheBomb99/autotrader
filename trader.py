@@ -43,7 +43,7 @@ bot = {
     "exposure_pct": 0
 }
 
-activity_log = ["TradeBot Engine Online... TradingView Candlesticks Enabled"]
+activity_log = ["TradeBot Engine Online... Awaiting Data Sync"]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
@@ -77,9 +77,6 @@ def get_positions():
         return r.json() if r.status_code == 200 else []
     except: return []
 
-# ---------------------------------------------------------
-# THE BUG FIX: Properly reading the Alpaca JSON format
-# ---------------------------------------------------------
 def get_daily_bars(symbol, limit=100):
     is_crypto = "/" in symbol
     url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/bars"
@@ -88,7 +85,6 @@ def get_daily_bars(symbol, limit=100):
         r = requests.get(url, headers=HEADERS, params=params)
         if r.status_code != 200: return None
         data = r.json()
-        # FIX: Always extract from the dictionary key matching the symbol
         bars = data.get("bars", {}).get(symbol, [])
         return pd.DataFrame(bars) if len(bars) > 0 else None
     except: return None
@@ -107,20 +103,20 @@ def analyze_swing_symbol(symbol, regime):
         ema21 = float(df["21_EMA"].iloc[-1])
         sma50 = float(df["50_SMA"].iloc[-1])
         
-        # Package OHLC data for TradingView Candlesticks
         if "t" in df:
             dates = [str(t)[:10] for t in df["t"].tail(30).tolist()]
         else:
             dates = [(datetime.now() - timedelta(days=30-i)).strftime('%Y-%m-%d') for i in range(30)]
 
+        # CRITICAL BUG FIX: Force conversion of numpy floats to standard Python floats
         spark_data = {
             "dates": dates,
-            "open": df["o"].tail(30).tolist(),
-            "high": df["h"].tail(30).tolist(),
-            "low": df["l"].tail(30).tolist(),
-            "close": df["c"].tail(30).tolist(),
-            "ema8": df["8_EMA"].tail(30).tolist(),
-            "ema21": df["21_EMA"].tail(30).tolist()
+            "open": [float(x) for x in df["o"].tail(30).tolist()],
+            "high": [float(x) for x in df["h"].tail(30).tolist()],
+            "low": [float(x) for x in df["l"].tail(30).tolist()],
+            "close": [float(x) for x in df["c"].tail(30).tolist()],
+            "ema8": [float(x) for x in df["8_EMA"].tail(30).tolist()],
+            "ema21": [float(x) for x in df["21_EMA"].tail(30).tolist()]
         }
         
         confidence = 50 
@@ -151,7 +147,7 @@ def analyze_swing_symbol(symbol, regime):
 
         return {
             "symbol": symbol, "confidence": confidence, "reasons": reasons, 
-            "counter_reasons": counter_reasons, "price": price_now, 
+            "counter_reasons": counter_reasons, "price": float(price_now), 
             "multiplier": multiplier, "risk": risk_lvl, "spark": spark_data
         }
     except Exception as e: 
@@ -174,7 +170,7 @@ def engine():
             regime = "CHOP"
             if spy_df is not None:
                 spy_c = float(spy_df['c'].iloc[-1])
-                spy_ema = spy_df['c'].ewm(span=10, adjust=False).mean().iloc[-1]
+                spy_ema = float(spy_df['c'].ewm(span=10, adjust=False).mean().iloc[-1])
                 regime = "BULLISH" if spy_c > spy_ema else "BEARISH"
 
             for p in pos:
@@ -222,7 +218,8 @@ def engine():
 threading.Thread(target=engine, daemon=True).start()
 
 @app.route("/api/data")
-def api_data(): return jsonify(global_state)
+def api_data(): 
+    return jsonify(global_state)
 
 @app.route("/")
 def home():
@@ -290,7 +287,6 @@ def home():
 <script>
     const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
     
-    // Initialize TradingView Chart
     const chartOptions = {
         layout: { textColor: '#a1a1aa', background: { type: 'solid', color: 'transparent' } },
         grid: { vertLines: { color: 'rgba(31, 41, 55, 0.2)' }, horzLines: { color: 'rgba(31, 41, 55, 0.2)' } },
@@ -323,11 +319,16 @@ def home():
     async function fetchData() {
         try {
             const response = await fetch('/api/data');
+            
+            // Handle if the Python backend is returning a 500 server error
+            if (!response.ok) {
+                throw new Error("Server returned " + response.status);
+            }
+            
             const data = await response.json();
             
             document.getElementById("status").innerText = "LIVE SYNC";
             document.getElementById("status").style.background = "var(--green)";
-            document.getElementById("mkt").innerText = data.market_status;
             
             document.getElementById("g-state").innerText = data.bot_stats.ai_state;
             document.getElementById("g-exp").innerText = data.bot_stats.exposure;
@@ -358,7 +359,6 @@ def home():
             const rankedContainer = document.getElementById("ranked");
             if (data.ranked && data.ranked.length > 0) {
                 
-                // Update TradingView Chart
                 const topTarget = data.ranked[0];
                 document.getElementById("chart-title").innerText = "X-Ray: " + topTarget.symbol;
                 if(topTarget.spark && topTarget.spark.dates.length > 0) {
@@ -405,7 +405,11 @@ def home():
                 logsContainer.innerHTML = html;
             }
             
-        } catch (error) { console.error("Fetch Error:", error); }
+        } catch (error) { 
+            console.error("Fetch Error:", error); 
+            document.getElementById("status").innerText = "SYNC ERROR";
+            document.getElementById("status").style.background = "var(--red)";
+        }
     }
 
     setInterval(fetchData, 3000);
