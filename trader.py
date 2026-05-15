@@ -37,7 +37,7 @@ bot = {
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"]
 }
 
-activity_log = ["TradeBot Engine v6.0 Online... Bypassing Cache."]
+activity_log = ["TradeBot Engine v7.0 Online... Safe Mode Engaged."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
@@ -80,42 +80,32 @@ def get_positions():
         return r.json() if r.status_code == 200 else []
     except: return []
 
-# CRITICAL FIX: Explicit start dates and feed routing to bypass Alpaca blocks
 def get_daily_bars(symbol, limit=100):
     is_crypto = "/" in symbol
     url = "https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/bars"
     
     start_date = (datetime.utcnow() - timedelta(days=150)).strftime('%Y-%m-%dT%H:%M:%SZ')
     params = {"symbols": symbol, "timeframe": "1Day", "limit": limit, "start": start_date}
-    
-    if not is_crypto: 
-        params["feed"] = "iex"
+    if not is_crypto: params["feed"] = "iex"
         
     try:
         r = requests.get(url, headers=HEADERS, params=params, timeout=10)
-        if r.status_code != 200: 
-            return None, f"Code {r.status_code}: {r.text}"
-        
+        if r.status_code != 200: return None, f"Code {r.status_code}: {r.text}"
         data = r.json()
         bars = data.get("bars", {}).get(symbol, [])
-        if not bars: 
-            return None, "Alpaca returned empty data array."
-        
+        if not bars: return None, "Alpaca returned empty data array."
         return pd.DataFrame(bars), "OK"
-    except Exception as e: 
-        return None, str(e)
+    except Exception as e: return None, str(e)
 
 def analyze_swing_symbol(symbol, regime):
     try:
         df, error_msg = get_daily_bars(symbol, 100)
         
         if df is None or len(df) < 20: 
-            # Output the EXACT error from Alpaca so we can see it
             return {
                 "symbol": symbol, "confidence": 0, "reasons": [], 
-                "counter_reasons": [f"API BLOCK: {error_msg}"], 
-                "price": 0.0, "multiplier": 0.0, "risk": "HIGH", 
-                "spark": {"dates": [], "open": [], "high": [], "low": [], "close": [], "ema8": [], "ema21": []}
+                "counter_reasons": [f"API ERROR: {error_msg}"], 
+                "price": 0.0, "multiplier": 0.0, "risk": "HIGH"
             }
         
         df['8_EMA'] = df['c'].ewm(span=8, adjust=False).mean()
@@ -127,18 +117,6 @@ def analyze_swing_symbol(symbol, regime):
         ema8 = float(df["8_EMA"].iloc[-1])
         ema21 = float(df["21_EMA"].iloc[-1])
         sma50 = float(df["50_SMA"].iloc[-1])
-        
-        dates = [str(t)[:10] for t in df["t"].tail(30).tolist()] if "t" in df else [str(i) for i in range(30)]
-
-        spark_data = {
-            "dates": dates,
-            "open": [float(x) for x in df["o"].tail(30).tolist()],
-            "high": [float(x) for x in df["h"].tail(30).tolist()],
-            "low": [float(x) for x in df["l"].tail(30).tolist()],
-            "close": [float(x) for x in df["c"].tail(30).tolist()],
-            "ema8": [float(x) for x in df["8_EMA"].tail(30).tolist()],
-            "ema21": [float(x) for x in df["21_EMA"].tail(30).tolist()]
-        }
         
         confidence = 50 
         reasons = []
@@ -161,13 +139,10 @@ def analyze_swing_symbol(symbol, regime):
         return {
             "symbol": symbol, "confidence": confidence, "reasons": reasons, 
             "counter_reasons": counter_reasons, "price": float(price_now), 
-            "multiplier": multiplier, "risk": "LOW" if price_now > ema21 else "HIGH", "spark": spark_data
+            "multiplier": multiplier, "risk": "LOW" if price_now > ema21 else "HIGH"
         }
     except Exception as e: 
-        return {
-            "symbol": symbol, "confidence": 0, "reasons": [], "counter_reasons": [f"Crash: {str(e)}"], 
-            "price": 0.0, "multiplier": 0.0, "risk": "HIGH", "spark": {}
-        }
+        return {"symbol": symbol, "confidence": 0, "reasons": [], "counter_reasons": [f"Crash: {str(e)}"], "price": 0.0, "multiplier": 0.0, "risk": "HIGH"}
 
 def engine():
     global global_state
@@ -256,9 +231,6 @@ def home():
     th { color:#9ca3af; padding-bottom:12px; border-bottom:1px solid var(--border); font-size:11px; text-transform:uppercase; }
     td { padding:12px 0; border-bottom:1px solid var(--border); }
     .pill { background:#4b5563; color:#fff; padding:4px 10px; border-radius:20px; font-size:11px; font-weight:900; }
-    .ai-btn { background:rgba(59,130,246,0.1); border:1px solid rgba(59,130,246,0.3); color:var(--blue); font-size:10px; padding:3px 6px; border-radius:4px; cursor:pointer; font-weight:bold; transition: 0.2s; }
-    .ai-panel { display:none; background:rgba(0,0,0,0.3); border-left: 2px solid var(--blue); padding:10px; margin-top:8px; border-radius:0 6px 6px 0; font-size:11px; }
-    .sparkline { width: 60px; height: 25px; }
 </style>
 </head>
 <body>
@@ -269,7 +241,7 @@ def home():
     <div><span id="regime" style="color:var(--orange);">REGIME: SCANNING</span></div>
 </div>
 <div class="header">
-    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v6.0</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
+    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v7.0 (SAFE MODE)</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
     <div class="pill" id="status" style="background:var(--orange)">CONNECTING...</div>
 </div>
 <div class="grid">
@@ -278,180 +250,117 @@ def home():
         <div class="muted" style="margin-top:15px;">Buying Power</div><div id="cash" style="font-weight:bold; font-size:18px; margin-bottom:15px;">$0.00</div>
         <hr style="border:0; border-top:1px solid var(--border); margin:20px 0;">
         <div class="muted" style="margin-bottom:10px;">Minervini Radar</div><div id="ranked">
-            <div style="padding:15px; text-align:center; color:var(--orange); border: 1px dashed var(--border); border-radius: 8px;">Waiting for Engine...</div>
+            <div style="padding:15px; text-align:center; color:var(--orange);">Waiting for Engine...</div>
         </div>
     </div>
     <div style="display:flex; flex-direction:column; gap:20px;">
         <div class="card" style="flex-grow:1; overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Live Swings</div><div id="pos-container">
             <div style="text-align:center; padding:20px; color:var(--orange);">Connecting to broker...</div>
         </div></div>
-        <div class="card">
-            <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:15px;">
-                <div><div class="muted" id="chart-title">AI Strategy X-Ray</div><div style="font-size:12px; color:#a1a1aa;">Tracking Top Target</div></div>
-            </div>
-            <div style="height:180px; width:100%; position:relative;"><canvas id="xrayCanvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas></div>
-        </div>
     </div>
-    <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Diagnostic Log</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
+    <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Activity Log</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
 </div>
 
 <script>
-    const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+    // BARE METAL ES5 JAVASCRIPT - NO FANCY SYNTAX, NO CANVAS
+    document.getElementById("logs").innerHTML = "<div style='color:var(--green); padding:5px 0;'>[UI] Safe Mode Interface loaded. Requesting data...</div>";
 
-    function drawNativeChart(data) {
-        const canvas = document.getElementById('xrayCanvas');
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d');
-        const rect = canvas.parentElement.getBoundingClientRect();
-        canvas.width = rect.width; canvas.height = rect.height;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    function updateDashboard() {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", "/api/data?t=" + new Date().getTime(), true);
+        xhr.timeout = 5000;
         
-        if (!data || !data.close || data.close.length === 0) return;
-        const w = canvas.width, h = canvas.height, len = data.close.length;
-        
-        let minP = Math.min.apply(null, data.low.concat(data.ema8, data.ema21));
-        let maxP = Math.max.apply(null, data.high.concat(data.ema8, data.ema21));
-        const pad = (maxP - minP) * 0.1 || 1;
-        minP -= pad; maxP += pad;
-
-        const step = w / len;
-        const candleW = step * 0.6;
-        function getY(price) { return h - ((price - minP) / (maxP - minP)) * h; }
-
-        ctx.strokeStyle = 'rgba(31, 41, 55, 0.4)'; ctx.beginPath();
-        for(let i=1; i<4; i++) { let y = i * (h/4); ctx.moveTo(0, y); ctx.lineTo(w, y); }
-        ctx.stroke();
-
-        for(let i=0; i<len; i++) {
-            const x = i * step + step/2, o = data.open[i], c = data.close[i], hi = data.high[i], lo = data.low[i];
-            const isGreen = c >= o;
-            ctx.strokeStyle = isGreen ? '#22c55e' : '#ef4444';
-            ctx.fillStyle = isGreen ? '#22c55e' : '#ef4444';
-            ctx.beginPath(); ctx.moveTo(x, getY(hi)); ctx.lineTo(x, getY(lo)); ctx.stroke();
-            const bTop = getY(Math.max(o, c)), bBot = getY(Math.min(o, c)), bHeight = Math.max(1, bBot - bTop);
-            ctx.fillRect(x - candleW/2, bTop, candleW, bHeight);
-        }
-
-        ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 2; ctx.beginPath();
-        for(let i=0; i<len; i++) { const x = i * step + step/2, y = getY(data.ema21[i]); if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
-        ctx.stroke();
-
-        ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 2; ctx.beginPath();
-        for(let i=0; i<len; i++) { const x = i * step + step/2, y = getY(data.ema8[i]); if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
-        ctx.stroke();
-    }
-
-    function togglePanel(id) {
-        const panel = document.getElementById(id);
-        panel.style.display = (panel.style.display === 'none' || panel.style.display === '') ? 'block' : 'none';
-    }
-
-    function createSparkline(dataArray, color) {
-        try {
-            if(!dataArray || dataArray.length === 0) return '';
-            const max = Math.max.apply(null, dataArray), min = Math.min.apply(null, dataArray), range = (max - min) || 1;
-            let pts = "";
-            for(let i=0; i<dataArray.length; i++) pts += (i/(dataArray.length-1)*60) + ',' + (25 - ((dataArray[i]-min)/range)*25) + ' ';
-            return '<svg class="sparkline" style="stroke:'+color+'; fill:none; stroke-width:1.5px;"><polyline points="'+pts+'"/></svg>';
-        } catch(e) { return ''; }
-    }
-
-    async function fetchData() {
-        try {
-            // CACHE BUSTER: Forces the browser to ask Python for brand new data every time
-            const response = await fetch('/api/data?timestamp=' + new Date().getTime());
-            const data = await response.json();
-            
-            if (data.error) {
-                document.getElementById("status").innerText = "API ERROR";
-                document.getElementById("status").style.background = "var(--red)";
-                document.getElementById("logs").innerHTML = "<div style='color:red'>" + data.details + "</div>" + document.getElementById("logs").innerHTML;
-                return;
-            }
-
-            document.getElementById("status").innerText = "LIVE SYNC";
-            document.getElementById("status").style.background = "var(--green)";
-            
-            document.getElementById("g-state").innerText = data.bot_stats.ai_state;
-            document.getElementById("g-exp").innerText = data.bot_stats.exposure;
-            document.getElementById("g-vol").innerText = data.bot_stats.volatility;
-            
-            const regimeSpan = document.getElementById("regime");
-            regimeSpan.innerText = "REGIME: " + data.market_regime;
-            if (data.market_regime.indexOf("BULLISH") !== -1) { regimeSpan.style.color = "var(--green)"; } 
-            else { regimeSpan.style.color = "var(--red)"; }
-            
-            document.getElementById("equity").innerText = formatter.format(data.account.equity || 0);
-            document.getElementById("cash").innerText = formatter.format(data.account.cash || 0);
-            
-            const posContainer = document.getElementById("pos-container");
-            if (data.positions && data.positions.length > 0) {
-                let html = '<table><thead><tr><th>Asset</th><th>Entry</th><th>Price</th><th>P/L</th></tr></thead><tbody>';
-                for (let i = 0; i < data.positions.length; i++) {
-                    const p = data.positions[i];
-                    const pl = parseFloat(p.unrealized_intraday_pl || 0);
-                    const plColor = pl >= 0 ? 'var(--green)' : 'var(--red)';
-                    html += '<tr><td><b>'+p.symbol+'</b></td><td>'+formatter.format(p.avg_entry_price)+'</td><td>'+formatter.format(p.current_price)+'</td><td style="color:'+plColor+'; font-weight:bold;">'+formatter.format(pl)+'</td></tr>';
-                }
-                posContainer.innerHTML = html + '</tbody></table>';
-            } else { posContainer.innerHTML = '<div style="text-align:center; padding:20px; color:var(--orange);">No Swings Active. Scouting...</div>'; }
-            
-            const rankedContainer = document.getElementById("ranked");
-            if (data.ranked && data.ranked.length > 0) {
-                let chartTarget = null;
-                for(let i=0; i<data.ranked.length; i++) { 
-                    if (data.ranked[i].spark && data.ranked[i].spark.close && data.ranked[i].spark.close.length > 0) { chartTarget = data.ranked[i]; break; } 
-                }
-                
-                if (chartTarget) {
-                    document.getElementById("chart-title").innerText = "X-Ray: " + chartTarget.symbol;
-                    drawNativeChart(chartTarget.spark);
-                }
-
-                let html = '';
-                for (let i = 0; i < data.ranked.length; i++) {
-                    const r = data.ranked[i];
-                    const color = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
-                    let statusText = r.multiplier > 0 ? "🟢 ACQUIRING" : (r.confidence > 40 ? "🟡 WATCHING" : "🔴 REJECTED");
+        xhr.onload = function() {
+            if (xhr.status === 200) {
+                try {
+                    var data = JSON.parse(xhr.responseText);
                     
-                    // Highlight the specific API Error if there is one
-                    if(r.counter_reasons && r.counter_reasons[0] && r.counter_reasons[0].indexOf("API BLOCK") !== -1) {
-                        statusText = "🟠 API ERROR";
+                    document.getElementById("status").innerText = "LIVE SYNC";
+                    document.getElementById("status").style.background = "var(--green)";
+                    
+                    document.getElementById("g-state").innerText = data.bot_stats.ai_state || "---";
+                    document.getElementById("g-exp").innerText = data.bot_stats.exposure || "0%";
+                    
+                    var regimeSpan = document.getElementById("regime");
+                    regimeSpan.innerText = "REGIME: " + (data.market_regime || "UNKNOWN");
+                    regimeSpan.style.color = (data.market_regime === "BULLISH") ? "var(--green)" : "var(--red)";
+                    
+                    var eq = parseFloat(data.account.equity || 0);
+                    var ca = parseFloat(data.account.cash || 0);
+                    document.getElementById("equity").innerText = "$" + eq.toFixed(2);
+                    document.getElementById("cash").innerText = "$" + ca.toFixed(2);
+                    
+                    // Positions
+                    var posHtml = "";
+                    if (data.positions && data.positions.length > 0) {
+                        posHtml += '<table><thead><tr><th>Asset</th><th>Entry</th><th>Price</th><th>P/L</th></tr></thead><tbody>';
+                        for (var i = 0; i < data.positions.length; i++) {
+                            var p = data.positions[i];
+                            var pl = parseFloat(p.unrealized_intraday_pl || 0);
+                            var color = pl >= 0 ? "var(--green)" : "var(--red)";
+                            posHtml += '<tr><td><b>' + p.symbol + '</b></td><td>$' + parseFloat(p.avg_entry_price).toFixed(2) + '</td><td>$' + parseFloat(p.current_price).toFixed(2) + '</td><td style="color:' + color + '; font-weight:bold;">$' + pl.toFixed(2) + '</td></tr>';
+                        }
+                        posHtml += '</tbody></table>';
+                    } else {
+                        posHtml = "<div style='text-align:center; padding:20px; color:var(--orange);'>No Swings Active. Scouting...</div>";
                     }
-
-                    let reasonsHtml = '';
-                    if (r.reasons) { for (let j=0; j<r.reasons.length; j++) reasonsHtml += '<li>'+r.reasons[j]+'</li>'; }
-                    if (r.counter_reasons) { for (let k=0; k<r.counter_reasons.length; k++) reasonsHtml += '<li style="color:var(--orange)">'+r.counter_reasons[k]+'</li>'; }
-                    html += '<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;">';
-                    html += '<div style="display:flex; justify-content:space-between; align-items:center;">';
-                    html += '<div style="display:flex; gap:10px; align-items:center;"><b>'+r.symbol+'</b>'+createSparkline(r.spark.close, color)+'</div>';
-                    html += '<div style="text-align:right;"><div style="font-weight:bold; color:'+color+';">'+r.confidence+'% Conf</div><div style="font-size:9px; color:#a1a1aa; margin-top:3px;">'+statusText+'</div></div>';
-                    html += '</div><div style="margin-top:8px;">';
-                    html += "<span class='ai-btn' onclick='togglePanel(\"ai-" + r.symbol + "\")'>Breakdown ▾</span></div>";
-                    html += '<div id="ai-'+r.symbol+'" class="ai-panel"><ul>'+reasonsHtml+'</ul></div></div>';
+                    document.getElementById("pos-container").innerHTML = posHtml;
+                    
+                    // Radar
+                    var rankHtml = "";
+                    if (data.ranked && data.ranked.length > 0) {
+                        for (var j = 0; j < data.ranked.length; j++) {
+                            var r = data.ranked[j];
+                            var rColor = r.confidence >= 80 ? "var(--green)" : (r.confidence >= 65 ? "var(--yellow)" : "var(--red)");
+                            var stat = r.multiplier > 0 ? "ACQUIRING" : "WATCHING";
+                            if (r.confidence === 0) stat = "REJECTED/ERROR";
+                            
+                            rankHtml += "<div style='margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;'>";
+                            rankHtml += "<div style='display:flex; justify-content:space-between;'>";
+                            rankHtml += "<div><b>" + r.symbol + "</b><br><span style='font-size:10px; color:#a1a1aa;'>$" + parseFloat(r.price).toFixed(2) + "</span></div>";
+                            rankHtml += "<div style='text-align:right;'><b style='color:" + rColor + ";'>" + r.confidence + "%</b><br><span style='font-size:9px; color:" + rColor + ";'>" + stat + "</span></div>";
+                            rankHtml += "</div></div>";
+                        }
+                    } else {
+                        rankHtml = "<div style='text-align:center; padding:15px; color:var(--orange);'>Sweeping Universe...</div>";
+                    }
+                    document.getElementById("ranked").innerHTML = rankHtml;
+                    
+                    // Logs
+                    var logHtml = "";
+                    if (data.activity && data.activity.length > 0) {
+                        for (var k = 0; k < data.activity.length; k++) {
+                            var a = data.activity[k];
+                            var lColor = (a.indexOf("ERROR") !== -1 || a.indexOf("Crash") !== -1) ? "var(--red)" : "#a1a1aa";
+                            logHtml += "<div style='padding:5px 0; border-bottom:1px solid #1f2937; color:" + lColor + ";'>" + a + "</div>";
+                        }
+                    }
+                    document.getElementById("logs").innerHTML = logHtml;
+                    
+                } catch (e) {
+                    document.getElementById("logs").innerHTML = "<div style='color:red;'>[JSON Parse Error] " + e.message + "</div>" + document.getElementById("logs").innerHTML;
                 }
-                rankedContainer.innerHTML = html;
-            } else { rankedContainer.innerHTML = '<div style="padding:15px; text-align:center; color:var(--orange); border: 1px dashed var(--border); border-radius: 8px;">📡 Waiting for Sweep...</div>'; }
-            
-            const logsContainer = document.getElementById("logs");
-            if (data.activity && data.activity.length > 0) {
-                let html = ''; 
-                for (let i = 0; i < data.activity.length; i++) {
-                    const a = data.activity[i];
-                    const logColor = (a.indexOf("ERROR") !== -1 || a.indexOf("CRASH") !== -1) ? "var(--red)" : "#a1a1aa";
-                    html += '<div style="padding:5px 0; border-bottom:1px solid #1f2937; color:' + logColor + ';">'+a+'</div>';
-                }
-                logsContainer.innerHTML = html;
+            } else {
+                document.getElementById("status").innerText = "SERVER ERROR";
+                document.getElementById("status").style.background = "var(--red)";
             }
-        } catch (error) { 
-            document.getElementById("status").innerText = "UI ERROR / RECONNECTING";
+        };
+        
+        xhr.onerror = function() {
+            document.getElementById("status").innerText = "NETWORK ERROR";
             document.getElementById("status").style.background = "var(--red)";
-            document.getElementById("logs").innerHTML = "<div style='color:red; padding:5px 0;'>[JS Crash] " + error.message + "</div>" + document.getElementById("logs").innerHTML;
-        }
+        };
+        
+        xhr.ontimeout = function() {
+            document.getElementById("status").innerText = "TIMEOUT";
+            document.getElementById("status").style.background = "var(--orange)";
+        };
+        
+        xhr.send();
     }
 
-    setInterval(fetchData, 3000);
-    fetchData();
+    setInterval(updateDashboard, 3000);
+    updateDashboard();
 </script>
 </body>
 </html>
