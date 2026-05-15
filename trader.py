@@ -297,38 +297,29 @@ def home():
 <script>
     const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 
-    // =========================================================
-    // NATIVE CANVAS CANDLESTICK ENGINE (Zero Dependencies)
-    // =========================================================
     function drawNativeChart(data) {
         const canvas = document.getElementById('xrayCanvas');
         if (!canvas) return;
         const ctx = canvas.getContext('2d');
-        
-        // Handle high-res displays dynamically
         const rect = canvas.parentElement.getBoundingClientRect();
         canvas.width = rect.width;
         canvas.height = rect.height;
-
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         
         if (!data || !data.close || data.close.length === 0) return;
-
         const w = canvas.width;
         const h = canvas.height;
         const len = data.close.length;
         
-        let minP = Math.min(...data.low, ...data.ema8, ...data.ema21);
-        let maxP = Math.max(...data.high, ...data.ema8, ...data.ema21);
+        let minP = Math.min.apply(null, data.low.concat(data.ema8, data.ema21));
+        let maxP = Math.max.apply(null, data.high.concat(data.ema8, data.ema21));
         const pad = (maxP - minP) * 0.1 || 1;
         minP -= pad; maxP += pad;
 
         const step = w / len;
         const candleW = step * 0.6;
-
         function getY(price) { return h - ((price - minP) / (maxP - minP)) * h; }
 
-        // Draw Grid
         ctx.strokeStyle = 'rgba(31, 41, 55, 0.5)';
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -338,28 +329,22 @@ def home():
         }
         ctx.stroke();
 
-        // Draw Candles
         for(let i=0; i<len; i++) {
             const x = i * step + step/2;
             const o = data.open[i], c = data.close[i], hi = data.high[i], lo = data.low[i];
             const isGreen = c >= o;
             ctx.strokeStyle = isGreen ? '#22c55e' : '#ef4444';
             ctx.fillStyle = isGreen ? '#22c55e' : '#ef4444';
-
-            // Wick
             ctx.beginPath();
             ctx.moveTo(x, getY(hi));
             ctx.lineTo(x, getY(lo));
             ctx.stroke();
-
-            // Body
             const bTop = getY(Math.max(o, c));
             const bBot = getY(Math.min(o, c));
             const bHeight = Math.max(1, bBot - bTop);
             ctx.fillRect(x - candleW/2, bTop, candleW, bHeight);
         }
 
-        // Draw 21 EMA (Orange)
         ctx.strokeStyle = '#f59e0b';
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -370,7 +355,6 @@ def home():
         }
         ctx.stroke();
 
-        // Draw 8 EMA (Blue)
         ctx.strokeStyle = '#3b82f6';
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -382,7 +366,6 @@ def home():
         ctx.stroke();
     }
 
-    // Auto-resize chart
     window.addEventListener('resize', () => {
         if(window.lastChartData) drawNativeChart(window.lastChartData);
     });
@@ -395,9 +378,11 @@ def home():
     function createSparkline(dataArray, color) {
         try {
             if(!dataArray || dataArray.length === 0) return '';
-            const max = Math.max(...dataArray), min = Math.min(...dataArray), range = (max - min) || 1;
+            const max = Math.max.apply(null, dataArray), min = Math.min.apply(null, dataArray), range = (max - min) || 1;
             let pts = "";
-            for(let i=0; i<dataArray.length; i++) pts += (i/(dataArray.length-1)*60) + ',' + (25 - ((dataArray[i]-min)/range)*25) + ' ';
+            for(let i=0; i<dataArray.length; i++) {
+                pts += (i/(dataArray.length-1)*60) + ',' + (25 - ((dataArray[i]-min)/range)*25) + ' ';
+            }
             return '<svg class="sparkline" style="stroke:'+color+'; fill:none; stroke-width:1.5px;"><polyline points="'+pts+'"/></svg>';
         } catch(e) { return ''; }
     }
@@ -447,7 +432,6 @@ def home():
                 const topTarget = data.ranked[0];
                 document.getElementById("chart-title").innerText = "X-Ray: " + topTarget.symbol;
                 
-                // NATIVE CHART DRAW
                 if(topTarget.spark && topTarget.spark.close.length > 0) {
                     window.lastChartData = topTarget.spark;
                     drawNativeChart(topTarget.spark);
@@ -459,15 +443,23 @@ def home():
                     let statusText = r.multiplier > 0 ? "🟢 ACQUIRING" : (r.confidence > 40 ? "🟡 WATCHING EMA" : "🔴 REJECTED");
 
                     let reasonsHtml = '';
-                    if (r.reasons) for (let res of r.reasons) reasonsHtml += '<li>' + res + '</li>';
-                    if (r.counter_reasons) for (let cr of r.counter_reasons) reasonsHtml += '<li style="color:var(--orange)">' + cr + '</li>';
+                    if (r.reasons) {
+                        for (let res of r.reasons) reasonsHtml += '<li>' + res + '</li>';
+                    }
+                    if (r.counter_reasons) {
+                        for (let cr of r.counter_reasons) reasonsHtml += '<li style="color:var(--orange)">' + cr + '</li>';
+                    }
                     
                     html += '<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;">';
                     html += '<div style="display:flex; justify-content:space-between; align-items:center;">';
                     html += '<div style="display:flex; gap:10px; align-items:center;"><b>' + r.symbol + '</b>' + createSparkline(r.spark.close, color) + '</div>';
                     html += '<div style="text-align:right;"><div style="font-weight:bold; color:' + color + ';">' + r.confidence + '% Conf</div><div style="font-size:9px; color:#a1a1aa; margin-top:3px;"><span style="color:'+color+'">' + statusText + '</span></div></div>';
                     html += '</div>';
-                    html += '<div style="margin-top:8px;"><span class="ai-btn" onclick="togglePanel(\\'ai-' + r.symbol + '\\')">Breakdown ▾</span></div>';
+                    html += '<div style="margin-top:8px;">';
+                    // NO BACKSLASHES USED HERE
+                    html += '<span class="ai-btn" onclick="togglePanel(';
+                    html += "'ai-" + r.symbol + "'";
+                    html += ')">Breakdown ▾</span></div>';
                     html += '<div id="ai-' + r.symbol + '" class="ai-panel"><ul>' + reasonsHtml + '</ul></div>';
                     html += '</div>';
                 }
@@ -479,7 +471,9 @@ def home():
             const logsContainer = document.getElementById("logs");
             if (data.activity && data.activity.length > 0) {
                 let html = '';
-                for (let a of data.activity) html += '<div style="padding:5px 0; border-bottom:1px solid #1f2937;">' + a + '</div>';
+                for (let a of data.activity) {
+                    html += '<div style="padding:5px 0; border-bottom:1px solid #1f2937;">' + a + '</div>';
+                }
                 logsContainer.innerHTML = html;
             }
             
@@ -495,3 +489,7 @@ def home():
 </script>
 </body>
 </html>
+"""
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT, threaded=True)
