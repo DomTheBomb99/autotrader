@@ -3,6 +3,7 @@ import time
 import threading
 import requests
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 
@@ -32,19 +33,17 @@ UNIVERSE = [
 bot = {
     "running": True,
     "base_trade_usd": 25.00,
-    "wins": 0,
-    "total_profit": 0.0,
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD"]
 }
 
-activity_log = ["TradeBot Engine Online... Initializing Native Radar."]
+activity_log = ["TradeBot Engine Online... Establishing secure connection."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00"},
     "positions": [],
     "ranked": [],
     "activity": activity_log[::-1],
-    "bot_stats": {"wins": 0, "profit": 0.0, "exposure": "0%", "ai_state": "BOOTING", "volatility": "NORMAL"},
+    "bot_stats": {"wins": 0, "profit": 0.0, "exposure": "0%", "ai_state": "SWINGING", "volatility": "NORMAL"},
     "market_status": "WAITING...",
     "is_open": False,
     "next_event": "",
@@ -59,26 +58,40 @@ def log_event(msg):
     if len(activity_log) > 30:
         activity_log.pop(0)
 
-# REBUILT: Ultra-reliable data fetching
+# HELPER: The "Nuclear Sanitizer" - Ensures JSON never crashes
+def sanitize_data(obj):
+    if isinstance(obj, dict):
+        return {k: sanitize_data(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_data(v) for v in obj]
+    elif isinstance(obj, float):
+        if np.isnan(obj) or np.isinf(obj): return 0.0
+        return obj
+    return obj
+
+def get_account():
+    try:
+        r = requests.get(f"{BASE_URL}/v2/account", headers=HEADERS, timeout=5)
+        return r.json() if r.status_code == 200 else {"equity": "0.00", "cash": "0.00"}
+    except: return {"equity": "0.00", "cash": "0.00"}
+
+def get_positions():
+    try:
+        r = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS, timeout=5)
+        return r.json() if r.status_code == 200 else []
+    except: return []
+
 def get_daily_bars(symbol, limit=100):
     is_crypto = "/" in symbol
-    if is_crypto:
-        url = "https://data.alpaca.markets/v1beta3/crypto/us/bars"
-        params = {"symbols": symbol, "timeframe": "1Day", "limit": limit}
-    else:
-        # Using the direct single-symbol endpoint for max stability
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars"
-        params = {"timeframe": "1Day", "limit": limit, "feed": "iex"}
-    
+    url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars" if is_crypto else f"{DATA_URL}/stocks/bars"
+    params = {"symbols": symbol, "timeframe": "1Day", "limit": limit} if is_crypto else {"symbols": symbol, "timeframe": "1Day", "limit": limit, "feed": "iex"}
     try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        r = requests.get(url, headers=HEADERS, params=params, timeout=8)
         if r.status_code != 200: return None
         data = r.json()
-        bars = data.get("bars", {}).get(symbol, []) if is_crypto else data.get("bars", [])
-        if not bars: return None
-        return pd.DataFrame(bars)
-    except:
-        return None
+        bars = data.get("bars", {}).get(symbol, [])
+        return pd.DataFrame(bars) if len(bars) > 0 else None
+    except: return None
 
 def analyze_swing_symbol(symbol, regime):
     try:
@@ -95,10 +108,7 @@ def analyze_swing_symbol(symbol, regime):
         ema21 = float(df["21_EMA"].iloc[-1])
         sma50 = float(df["50_SMA"].iloc[-1])
         
-        if "t" in df:
-            dates = [str(t)[:10] for t in df["t"].tail(30).tolist()]
-        else:
-            dates = [(datetime.now() - timedelta(days=30-i)).strftime('%Y-%m-%d') for i in range(30)]
+        dates = [str(t)[:10] for t in df["t"].tail(30).tolist()] if "t" in df else [str(i) for i in range(30)]
 
         spark_data = {
             "dates": dates,
@@ -114,8 +124,8 @@ def analyze_swing_symbol(symbol, regime):
         reasons = []
         counter_reasons = []
 
-        if price_now > sma50: confidence += 20; reasons.append("Above 50 SMA")
-        else: confidence -= 20; counter_reasons.append("Below 50 SMA")
+        if price_now > sma50: confidence += 20; reasons.append("Price > 50 SMA")
+        else: confidence -= 20; counter_reasons.append("Price < 50 SMA")
 
         if ema8 > ema21: confidence += 20; reasons.append("8 EMA > 21 EMA")
         else: confidence -= 15; counter_reasons.append("Waiting for EMA Cross")
@@ -157,7 +167,7 @@ def engine():
                 spy_ema = float(spy_df['c'].ewm(span=10, adjust=False).mean().iloc[-1])
                 regime = "BULLISH" if spy_c > spy_ema else "BEARISH"
 
-            # Check exits for active positions
+            # Check exits
             for p in pos:
                 sym = p.get('symbol')
                 if not sym or sym == "USD": continue
@@ -166,22 +176,21 @@ def engine():
                     p_df['21_EMA'] = p_df['c'].ewm(span=21, adjust=False).mean()
                     orange_line = float(p_df['21_EMA'].iloc[-1])
                     if float(p.get("current_price")) < orange_line:
-                        log_event(f"EXIT: {sym} dropped below 21 EMA.")
+                        log_event(f"EXIT: {sym} closed below 21 EMA.")
                         requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS, timeout=5)
 
-            # Analyze the market
+            # Analyze market
             active_list = UNIVERSE + bot["crypto_watchlist"]
             ranked_results = [analyze_swing_symbol(s, regime) for s in active_list]
             ranked = [r for r in ranked_results if r is not None]
             ranked.sort(key=lambda x: x["confidence"], reverse=True)
 
-            log_event(f"📡 Radar Sweep Complete. Found {len(ranked)} viable targets.")
+            log_event(f"📡 Radar Swept {len(ranked)} targets. Top: {ranked[0]['symbol'] if ranked else 'NONE'}")
 
-            # Execution
             for r in ranked[:2]:
                 if r["multiplier"] > 0 and not any(p.get('symbol') == r['symbol'] for p in pos):
-                    if cash >= (bot["base_trade_usd"] * r["multiplier"]):
-                        val = bot["base_trade_usd"] * r["multiplier"]
+                    if cash >= (bot.get("base_trade_usd") * r["multiplier"]):
+                        val = bot.get("base_trade_usd") * r["multiplier"]
                         qty = round(val / r["price"], 5)
                         payload = {"symbol": r['symbol'], "qty": qty, "side": "buy", "type": "market", "time_in_force": "gtc"}
                         requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload, timeout=5)
@@ -192,18 +201,19 @@ def engine():
 
             global_state = {
                 "account": acc, "positions": pos, "ranked": ranked[:8], "activity": activity_log[::-1],
-                "bot_stats": {"wins": bot["wins"], "profit": bot["total_profit"], "exposure": str(exposure) + "%", "ai_state": "SWINGING", "volatility": "NORMAL"},
+                "bot_stats": {"wins": 0, "profit": 0.0, "exposure": str(exposure) + "%", "ai_state": "SWINGING", "volatility": "NORMAL"},
                 "market_status": "MARKET OPEN" if is_open else "MARKET CLOSED",
                 "market_regime": regime, "is_open": is_open, "next_event": clock_data.get('next_close', '')
             }
         except Exception as e:
-            log_event(f"ERROR: Market scan intermittent.")
+            log_event(f"RECONNECTING: Waiting for fresh market data...")
         time.sleep(60)
 
 threading.Thread(target=engine, daemon=True).start()
 
 @app.route("/api/data")
-def api_data(): return jsonify(global_state)
+def api_data(): 
+    return jsonify(sanitize_data(global_state))
 
 @app.route("/")
 def home():
@@ -255,7 +265,7 @@ def home():
     </div>
     <div style="display:flex; flex-direction:column; gap:20px;">
         <div class="card" style="flex-grow:1; overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Live Swings</div><div id="pos-container">
-            <div style="text-align:center; padding:20px; color:var(--orange);">Waiting for broker data...</div>
+            <div style="text-align:center; padding:20px; color:var(--orange);">Connecting to broker...</div>
         </div></div>
         <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:15px;">
@@ -265,10 +275,12 @@ def home():
                     <span style="color:var(--orange);">21 EMA</span>
                 </div>
             </div>
-            <div style="height:180px; width:100%; position:relative;"><canvas id="xrayCanvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas></div>
+            <div style="height:180px; width:100%; position:relative;">
+                <canvas id="xrayCanvas" style="position:absolute; top:0; left:0; width:100%; height:100%;"></canvas>
+            </div>
         </div>
     </div>
-    <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Activity</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
+    <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Activity Log</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
 </div>
 
 <script>
@@ -336,7 +348,7 @@ def home():
     async function fetchData() {
         try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 8000);
+            const timeoutId = setTimeout(() => controller.abort(), 6000);
             const response = await fetch('/api/data', { signal: controller.signal });
             clearTimeout(timeoutId);
             const data = await response.json();
