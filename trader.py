@@ -3,7 +3,6 @@ import time
 import threading
 import requests
 import pandas as pd
-import random
 from datetime import datetime
 from flask import Flask, jsonify
 
@@ -111,22 +110,29 @@ def analyze_swing_symbol(symbol, regime):
         counter_reasons = []
 
         if price_now > sma50:
-            confidence += 20; reasons.append("Price > 50 SMA")
+            confidence += 20
+            reasons.append("Price > 50 SMA")
         else:
-            confidence -= 20; counter_reasons.append("Price < 50 SMA")
+            confidence -= 20
+            counter_reasons.append("Price < 50 SMA")
 
         if ema8 > ema21:
-            confidence += 20; reasons.append("8 EMA > 21 EMA")
+            confidence += 20
+            reasons.append("8 EMA > 21 EMA")
         else:
-            confidence -= 15; counter_reasons.append("EMA Cross Missing")
+            confidence -= 15
+            counter_reasons.append("EMA Cross Missing")
 
         if price_now > ema8:
-            confidence += 10; reasons.append("Momentum is Positive")
+            confidence += 10
+            reasons.append("Momentum is Positive")
         
         if regime == "BULLISH":
-            confidence += 15; reasons.append("Market Regime: Bullish")
+            confidence += 15
+            reasons.append("Market Regime: Bullish")
         elif regime == "BEARISH":
-            confidence -= 25; counter_reasons.append("Market Regime: Bearish")
+            confidence -= 25
+            counter_reasons.append("Market Regime: Bearish")
 
         confidence = max(0, min(100, confidence))
         multiplier = 1.5 if confidence >= 80 else (1.0 if confidence >= 65 else 0.0)
@@ -212,7 +218,6 @@ def home():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TradeBot Terminal</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
     :root { --bg: #0b1220; --card: #111827; --border: #1f2937; --text: #e5e7eb; --green: #22c55e; --yellow: #eab308; --red: #ef4444; --orange: #f59e0b; --blue: #3b82f6; }
     body { margin:0; background:var(--bg); color:var(--text); font-family:sans-serif; overflow-x:hidden; }
@@ -229,7 +234,6 @@ def home():
     .status-badge { font-size:9px; padding:2px 6px; border-radius:4px; font-weight:bold; display:inline-block; }
     .ai-btn { background:rgba(59,130,246,0.1); border:1px solid rgba(59,130,246,0.3); color:var(--blue); font-size:10px; padding:3px 6px; border-radius:4px; cursor:pointer; font-weight:bold; transition: 0.2s; }
     .ai-panel { display:none; background:rgba(0,0,0,0.3); border-left: 2px solid var(--blue); padding:10px; margin-top:8px; border-radius:0 6px 6px 0; font-size:11px; }
-    .sparkline { width: 60px; height: 25px; }
     @media (max-width: 1024px) { .grid { grid-template-columns: 1fr; height:auto; } .card { margin-bottom:15px; } }
 </style>
 </head>
@@ -258,97 +262,102 @@ def home():
                 <div><div class="muted">Wins</div><div id="winrate" style="font-size:24px; font-weight:bold; color:var(--green);">0</div></div>
                 <div style="text-align:right;"><div class="muted">Total Profit</div><div id="profit" style="font-size:24px; font-weight:bold; color:var(--green);">$0.00</div></div>
             </div>
-            <div style="height:180px; width:100%; position:relative;"><canvas id="equityChart"></canvas></div>
+            <div style="height:180px; width:100%; position:relative; display:flex; align-items:center; justify-content:center; border:1px dashed #1f2937; border-radius:8px; color:#6b7280; font-size:12px;">Chart Offline for Stability</div>
         </div>
     </div>
     <div class="card" style="overflow-y:auto;"><div class="muted" style="margin-bottom:15px;">Activity</div><div id="logs" style="font-family:monospace; font-size:11px; line-height:1.6; color:#a1a1aa;"></div></div>
 </div>
+
 <script>
-    const f = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
-    const ctx = document.getElementById('equityChart').getContext('2d');
-    const eqChart = new Chart(ctx, {
-        type: 'line',
-        data: { labels: [], datasets: [{ data: [], borderColor: '#22c55e', borderWidth: 2, pointRadius: 0, tension: 0, fill: true, backgroundColor: 'rgba(34,197,94,0.05)' }]},
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: true }, y: { display: true } }, animation: { duration: 0 } }
-    });
-    function toggleAI(symbol) { 
-        const p = document.getElementById('ai-' + symbol); 
-        p.style.display = (p.style.display === 'none' || p.style.display === '') ? 'block' : 'none'; 
-    }
-    function createSparkline(dataArray, color) {
-        if(!dataArray || dataArray.length === 0) return '';
-        const max = Math.max.apply(null, dataArray), min = Math.min.apply(null, dataArray), range = (max - min) || 1;
-        let pts = "";
-        for(let i=0; i<dataArray.length; i++) {
-            pts += (i/(dataArray.length-1)*60) + ',' + (25 - ((dataArray[i]-min)/range)*25) + ' ';
+    const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+    
+    function togglePanel(id) {
+        const panel = document.getElementById(id);
+        if (panel.style.display === 'none' || panel.style.display === '') {
+            panel.style.display = 'block';
+        } else {
+            panel.style.display = 'none';
         }
-        return '<svg class="sparkline" style="stroke:'+color+'; fill:none; stroke-width:1.5px;"><polyline points="'+pts+'"/></svg>';
     }
-    async function fetchBotData() {
+
+    async function fetchData() {
         try {
             const response = await fetch('/api/data');
-            const d = await response.json();
+            const data = await response.json();
+            
             document.getElementById("status").innerText = "LIVE SYNC";
             document.getElementById("status").style.background = "var(--green)";
-            document.getElementById("g-state").innerText = d.bot_stats.ai_state;
-            document.getElementById("g-exp").innerText = d.bot_stats.exposure;
-            document.getElementById("g-vol").innerText = d.bot_stats.volatility;
-            document.getElementById("regime").innerText = "REGIME: " + d.market_regime;
-            document.getElementById("regime").style.color = d.market_regime.indexOf("BULLISH") !== -1 ? "var(--green)" : "var(--red)";
-            let curE = parseFloat(d.account.equity || 0);
-            document.getElementById("equity").innerText = f.format(curE);
-            document.getElementById("cash").innerText = f.format(d.account.cash);
-            document.getElementById("winrate").innerText = d.bot_stats.wins;
-            document.getElementById("profit").innerText = f.format(d.bot_stats.profit);
-            if (curE > 0) {
-                const now = new Date();
-                eqChart.data.labels.push(now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0'));
-                eqChart.data.datasets[0].data.push(curE);
-                if(eqChart.data.labels.length > 30) { eqChart.data.labels.shift(); eqChart.data.datasets[0].data.shift(); }
-                eqChart.update();
-            }
-            const posC = document.getElementById("pos-container");
-            if (d.positions && d.positions.length > 0) {
+            document.getElementById("mkt").innerText = data.market_status;
+            
+            document.getElementById("g-state").innerText = data.bot_stats.ai_state;
+            document.getElementById("g-exp").innerText = data.bot_stats.exposure;
+            document.getElementById("g-vol").innerText = data.bot_stats.volatility;
+            
+            const regimeSpan = document.getElementById("regime");
+            regimeSpan.innerText = "REGIME: " + data.market_regime;
+            regimeSpan.style.color = data.market_regime.includes("BULLISH") ? "var(--green)" : "var(--red)";
+            
+            const eq = parseFloat(data.account.equity || 0);
+            document.getElementById("equity").innerText = formatter.format(eq);
+            document.getElementById("cash").innerText = formatter.format(data.account.cash);
+            document.getElementById("winrate").innerText = data.bot_stats.wins;
+            document.getElementById("profit").innerText = formatter.format(data.bot_stats.profit);
+            
+            // Positions
+            const posContainer = document.getElementById("pos-container");
+            if (data.positions && data.positions.length > 0) {
                 let html = '<table><thead><tr><th>Asset</th><th>Entry</th><th>Price</th><th>P/L</th></tr></thead><tbody>';
-                for(let i=0; i<d.positions.length; i++){
-                    let p = d.positions[i];
-                    let pl = parseFloat(p.unrealized_intraday_pl);
-                    html += '<tr><td><b>'+p.symbol+'</b></td><td>'+f.format(p.avg_entry_price)+'</td><td>'+f.format(p.current_price)+'</td><td style="color:'+(pl >= 0 ? 'var(--green)' : 'var(--red)')+'; font-weight:bold;">'+f.format(pl)+'</td></tr>';
+                for (let p of data.positions) {
+                    const pl = parseFloat(p.unrealized_intraday_pl || 0);
+                    const plColor = pl >= 0 ? 'var(--green)' : 'var(--red)';
+                    html += '<tr><td><b>' + p.symbol + '</b></td><td>' + formatter.format(p.avg_entry_price) + '</td><td>' + formatter.format(p.current_price) + '</td><td style="color:' + plColor + '; font-weight:bold;">' + formatter.format(pl) + '</td></tr>';
                 }
                 html += '</tbody></table>';
-                posC.innerHTML = html;
+                posContainer.innerHTML = html;
             } else {
-                posC.innerHTML = '<div class="countdown-box"><div class="muted">No Swings Active</div><div style="font-size:14px; color:var(--orange); font-weight:bold; margin:10px 0;">📡 Scanning Daily Trends...</div></div>';
+                posContainer.innerHTML = '<div style="text-align:center; padding:20px; color:var(--orange);">No Swings Active. Scanning...</div>';
             }
-            if (d.ranked) {
+            
+            // Targets
+            const rankedContainer = document.getElementById("ranked");
+            if (data.ranked && data.ranked.length > 0) {
                 let html = '';
-                for(let i=0; i<d.ranked.length; i++){
-                    let r = d.ranked[i];
-                    let confC = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
-                    html += '<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;">' +
-                        '<div style="display:flex; justify-content:space-between; align-items:center;">' +
-                        '<div style="display:flex; gap:10px; align-items:center;"><b>'+r.symbol+'</b>'+createSparkline(r.spark, confC)+'</div>' +
-                        '<div style="font-weight:bold; color:'+confC+'; font-size:12px;">'+r.confidence+'%</div>' +
-                        '</div>' +
-                        '<div style="margin-top:8px;"><span class="ai-btn" onclick="toggleAI(\''+r.symbol+'\')">📊 Breakdown</span></div>' +
-                        '<div id="ai-'+r.symbol+'" class="ai-panel">' +
-                        '<div style="color:var(--blue); font-weight:bold;">Signals:</div>' +
-                        '<ul style="padding-left:15px; color:#a1a1aa;">' +
-                        r.reasons.map(function(res){ return '<li>'+res+'</li>'; }).join('') +
-                        r.counter_reasons.map(function(c){ return '<li style="color:var(--orange)">'+c+'</li>'; }).join('') +
-                        '</ul></div></div>';
+                for (let r of data.ranked) {
+                    const color = r.confidence >= 80 ? 'var(--green)' : (r.confidence >= 65 ? 'var(--yellow)' : 'var(--red)');
+                    let reasonsHtml = '';
+                    if (r.reasons) {
+                        for (let res of r.reasons) reasonsHtml += '<li>' + res + '</li>';
+                    }
+                    if (r.counter_reasons) {
+                        for (let cr of r.counter_reasons) reasonsHtml += '<li style="color:var(--orange)">' + cr + '</li>';
+                    }
+                    
+                    html += '<div style="margin-bottom:12px; border-bottom:1px solid var(--border); padding-bottom:10px;">';
+                    html += '<div style="display:flex; justify-content:space-between;"><b>' + r.symbol + '</b><b style="color:' + color + '">' + r.confidence + '%</b></div>';
+                    html += '<div style="margin-top:5px;"><span class="ai-btn" onclick="togglePanel(\\'ai-' + r.symbol + '\\')">Breakdown</span></div>';
+                    html += '<div id="ai-' + r.symbol + '" class="ai-panel"><ul>' + reasonsHtml + '</ul></div>';
+                    html += '</div>';
                 }
-                document.getElementById("ranked").innerHTML = html;
+                rankedContainer.innerHTML = html;
             }
-            let logsHtml = '';
-            for(let i=0; i<d.activity.length; i++){
-                logsHtml += '<div style="padding:5px 0; border-bottom:1px solid #1f2937;">'+d.activity[i]+'</div>';
+            
+            // Logs
+            const logsContainer = document.getElementById("logs");
+            if (data.activity && data.activity.length > 0) {
+                let html = '';
+                for (let a of data.activity) {
+                    html += '<div style="padding:5px 0; border-bottom:1px solid #1f2937;">' + a + '</div>';
+                }
+                logsContainer.innerHTML = html;
             }
-            document.getElementById("logs").innerHTML = logsHtml;
-        } catch (e) { console.log(e); }
+            
+        } catch (error) {
+            console.error("Fetch Error:", error);
+        }
     }
-    setInterval(fetchBotData, 3000);
-    fetchBotData();
+
+    setInterval(fetchData, 3000);
+    fetchData();
 </script>
 </body>
 </html>
