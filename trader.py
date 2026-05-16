@@ -33,13 +33,13 @@ UNIVERSE = [
 
 bot = {
     "running": True,
-    "base_trade_usd": 25.00,
+    "trade_allocation_pct": 30.0, # Uses 30% of total equity per trade
     "wins": 0,
     "total_profit": 0.0,
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "AVAX/USD", "LINK/USD", "BCH/USD", "LTC/USD"]
 }
 
-activity_log = ["TradeBot Engine v10.0 Online... Interactive UI Loaded."]
+activity_log = ["TradeBot Engine v11.0 Online... Dynamic Sizing & Fast Exits Active."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00", "last_equity": "0.00"},
@@ -185,7 +185,7 @@ def engine():
                 spy_ema = float(spy_df['c'].ewm(span=10, adjust=False).mean().iloc[-1])
                 regime = "BULLISH" if spy_c > spy_ema else "BEARISH"
 
-            # Check exits and enrich positions with spark data for the charts
+            # Check exits and enrich positions
             enriched_pos = []
             for p in pos:
                 sym = p.get('symbol')
@@ -198,7 +198,10 @@ def engine():
                     p_df['8_EMA'] = p_df['c'].ewm(span=8, adjust=False).mean()
                     p_df['21_EMA'] = p_df['c'].ewm(span=21, adjust=False).mean()
                     p_df.fillna(0.0, inplace=True)
+                    blue_line = float(p_df['8_EMA'].iloc[-1])
                     orange_line = float(p_df['21_EMA'].iloc[-1])
+                    curr_p = float(p.get("current_price"))
+                    pl_pc = float(p.get("unrealized_plpc", 0))
                     
                     dates = [str(t)[:10] for t in p_df["t"].tail(30).tolist()] if "t" in p_df else [str(i) for i in range(30)]
                     spark_data = {
@@ -211,12 +214,20 @@ def engine():
                         "ema21": [float(x) for x in p_df["21_EMA"].tail(30).tolist()]
                     }
                     
-                    if float(p.get("current_price")) < orange_line:
+                    # 1. HARD STOP: Broken Trend
+                    if curr_p < orange_line:
                         if is_open or "/" in sym:
-                            log_event(f"EXIT: {sym} closed below 21 EMA.")
+                            log_event(f"EXIT: {sym} trend broken (Below 21 EMA).")
                             requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS, timeout=5)
                         else:
-                            log_event(f"HOLDING: {sym} below EMA, market closed.")
+                            log_event(f"HOLDING: {sym} trend broken, waiting for open.")
+                    # 2. FAST EXIT: Stagnation & Loss of Momentum
+                    elif curr_p < blue_line and pl_pc < 0.02:
+                        if is_open or "/" in sym:
+                            log_event(f"SELL: {sym} lost momentum. Freeing cash.")
+                            requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS, timeout=5)
+                        else:
+                            log_event(f"HOLDING: {sym} stagnating, waiting for open.")
                 
                 p_copy = dict(p)
                 if spark_data: p_copy["spark"] = spark_data
@@ -232,14 +243,22 @@ def engine():
             ranked_results.sort(key=lambda x: x["confidence"], reverse=True)
             log_event(f"Radar Swept {len(ranked_results)} targets. Regime: {regime}")
 
+            # Dynamic Buying Logic
             for r in ranked_results[:2]:
                 if r["multiplier"] > 0 and not any(p.get('symbol') == r['symbol'] for p in pos):
-                    if cash >= (bot.get("base_trade_usd") * r["multiplier"]):
-                        val = bot.get("base_trade_usd") * r["multiplier"]
-                        qty = round(val / r["price"], 5)
-                        payload = {"symbol": r['symbol'], "qty": qty, "side": "buy", "type": "market", "time_in_force": "gtc"}
-                        requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload, timeout=5)
-                        log_event(f"BUY: {r['symbol']} (${val:.2f})")
+                    # Calculate dynamic trade size based on total equity
+                    trade_val = (equity * (bot.get("trade_allocation_pct", 30.0) / 100.0)) * r["multiplier"]
+                    
+                    # Ensure we don't overspend available cash
+                    if cash > 5.0:
+                        actual_val = min(trade_val, cash - 1.0) # Leave $1 buffer
+                        qty = round(actual_val / r["price"], 5)
+                        
+                        if qty > 0:
+                            payload = {"symbol": r['symbol'], "qty": qty, "side": "buy", "type": "market", "time_in_force": "gtc"}
+                            requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload, timeout=5)
+                            log_event(f"BUY: {r['symbol']} (${actual_val:.2f})")
+                            cash -= actual_val # Deduct locally to allow multiple buys in one loop
 
             invested = sum(float(p.get("market_value") or 0) for p in pos if p.get('symbol') != "USD")
             exposure = int((invested / equity) * 100) if equity > 0 else 0
@@ -304,7 +323,7 @@ def home():
     <div><span id="regime" style="color:var(--orange);">REGIME: SCANNING</span></div>
 </div>
 <div class="header">
-    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v10.0</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
+    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v11.0</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
     <div class="pill" id="status" style="background:var(--orange)">CONNECTING...</div>
 </div>
 <div class="grid">
@@ -442,10 +461,10 @@ def home():
             var lastEq = parseFloat(data.account.last_equity || eq);
             var eqDiff = eq - lastEq;
             var diffColor = eqDiff >= 0 ? 'var(--green)' : 'var(--red)';
-            var diffSign = eqDiff >= 0 ? '+' : '-';
+            var diffSign = eqDiff >= 0 ? '+' : '';
             
             document.getElementById("equity").innerText = formatter.format(eq);
-            document.getElementById("equity-change").innerText = diffSign + formatter.format(Math.abs(eqDiff));
+            document.getElementById("equity-change").innerText = diffSign + formatter.format(eqDiff);
             document.getElementById("equity-change").style.color = diffColor;
             
             document.getElementById("cash").innerText = formatter.format(data.account.cash || 0);
@@ -520,7 +539,6 @@ def home():
                     html += '<div style="text-align:right;"><div style="font-weight:bold; color:'+color+';">'+r.confidence+'% Conf</div><div style="font-size:9px; color:#a1a1aa; margin-top:3px;">'+statusText+'</div></div>';
                     html += '</div>';
                     html += '<div style="margin-top:8px; padding-left:5px;">';
-                    // STOP EVENT BUBBLING so clicking breakdown doesnt also click the row
                     html += '<span class="ai-btn" onclick="event.stopPropagation(); togglePanel(\\'ai-'+r.symbol+'\\')">Breakdown ▾</span></div>';
                     
                     const dStyle = window.openPanels['ai-'+r.symbol] ? 'block' : 'none';
@@ -546,8 +564,9 @@ def home():
         }
     }
 
+    // Force an immediate fetch on load, then every 3 seconds
+    setTimeout(fetchData, 100);
     setInterval(fetchData, 3000);
-    fetchData();
 </script>
 </body>
 </html>
@@ -555,4 +574,3 @@ def home():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, threaded=True)
-    
