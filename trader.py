@@ -33,13 +33,13 @@ UNIVERSE = [
 
 bot = {
     "running": True,
-    "trade_allocation_pct": 30.0, # Uses 30% of total equity per trade
+    "trade_allocation_pct": 30.0, 
     "wins": 0,
     "total_profit": 0.0,
     "crypto_watchlist": ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "AVAX/USD", "LINK/USD", "BCH/USD", "LTC/USD"]
 }
 
-activity_log = ["TradeBot Engine v11.0 Online... Dynamic Sizing & Fast Exits Active."]
+activity_log = ["TradeBot Engine v12.0 Online... Ghost Orders Fixed."]
 
 global_state = {
     "account": {"equity": "0.00", "cash": "0.00", "last_equity": "0.00"},
@@ -79,6 +79,13 @@ def get_account():
 def get_positions():
     try:
         r = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS, timeout=5)
+        return r.json() if r.status_code == 200 else []
+    except: return []
+
+# NEW: Fetch pending orders to prevent spamming
+def get_open_orders():
+    try:
+        r = requests.get(f"{BASE_URL}/v2/orders?status=open", headers=HEADERS, timeout=5)
         return r.json() if r.status_code == 200 else []
     except: return []
 
@@ -175,6 +182,8 @@ def engine():
             
             acc = get_account()
             pos = get_positions()
+            open_orders = get_open_orders() # Fetch pending checkout cart
+            
             cash = float(acc.get("cash") or 0)
             equity = float(acc.get("equity") or 0)
             
@@ -214,14 +223,12 @@ def engine():
                         "ema21": [float(x) for x in p_df["21_EMA"].tail(30).tolist()]
                     }
                     
-                    # 1. HARD STOP: Broken Trend
                     if curr_p < orange_line:
                         if is_open or "/" in sym:
                             log_event(f"EXIT: {sym} trend broken (Below 21 EMA).")
                             requests.delete(f"{BASE_URL}/v2/positions/{sym}", headers=HEADERS, timeout=5)
                         else:
                             log_event(f"HOLDING: {sym} trend broken, waiting for open.")
-                    # 2. FAST EXIT: Stagnation & Loss of Momentum
                     elif curr_p < blue_line and pl_pc < 0.02:
                         if is_open or "/" in sym:
                             log_event(f"SELL: {sym} lost momentum. Freeing cash.")
@@ -243,22 +250,29 @@ def engine():
             ranked_results.sort(key=lambda x: x["confidence"], reverse=True)
             log_event(f"Radar Swept {len(ranked_results)} targets. Regime: {regime}")
 
+            # Extract symbols we already own or are waiting to buy
+            owned_symbols = [p.get('symbol') for p in pos]
+            pending_symbols = [o.get('symbol') for o in open_orders]
+
             # Dynamic Buying Logic
             for r in ranked_results[:2]:
-                if r["multiplier"] > 0 and not any(p.get('symbol') == r['symbol'] for p in pos):
-                    # Calculate dynamic trade size based on total equity
+                if r["multiplier"] > 0 and r['symbol'] not in owned_symbols and r['symbol'] not in pending_symbols:
                     trade_val = (equity * (bot.get("trade_allocation_pct", 30.0) / 100.0)) * r["multiplier"]
                     
-                    # Ensure we don't overspend available cash
                     if cash > 5.0:
-                        actual_val = min(trade_val, cash - 1.0) # Leave $1 buffer
+                        actual_val = min(trade_val, cash - 1.0)
                         qty = round(actual_val / r["price"], 5)
                         
                         if qty > 0:
-                            payload = {"symbol": r['symbol'], "qty": qty, "side": "buy", "type": "market", "time_in_force": "gtc"}
-                            requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload, timeout=5)
-                            log_event(f"BUY: {r['symbol']} (${actual_val:.2f})")
-                            cash -= actual_val # Deduct locally to allow multiple buys in one loop
+                            # FIX: Use "day" instead of "gtc" for fractional shares
+                            payload = {"symbol": r['symbol'], "qty": qty, "side": "buy", "type": "market", "time_in_force": "day"}
+                            r_buy = requests.post(f"{BASE_URL}/v2/orders", headers=HEADERS, json=payload, timeout=5)
+                            
+                            if r_buy.status_code in [200, 201]:
+                                log_event(f"ORDER PLACED: {r['symbol']} (${actual_val:.2f})")
+                                cash -= actual_val
+                            else:
+                                log_event(f"ORDER FAILED: {r['symbol']} - {r_buy.text}")
 
             invested = sum(float(p.get("market_value") or 0) for p in pos if p.get('symbol') != "USD")
             exposure = int((invested / equity) * 100) if equity > 0 else 0
@@ -323,7 +337,7 @@ def home():
     <div><span id="regime" style="color:var(--orange);">REGIME: SCANNING</span></div>
 </div>
 <div class="header">
-    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v11.0</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
+    <div><span style="font-weight:900; font-size:18px;">TRADE<span style="color:var(--green)">BOT v12.0</span></span><span id="mkt" style="margin-left:20px; font-size:11px; color:#9ca3af; font-weight:bold;">...</span></div>
     <div class="pill" id="status" style="background:var(--orange)">CONNECTING...</div>
 </div>
 <div class="grid">
@@ -553,7 +567,7 @@ def home():
                 let html = ''; 
                 for (let i = 0; i < data.activity.length; i++) {
                     const a = data.activity[i];
-                    const logColor = (a.indexOf("ERROR") !== -1 || a.indexOf("CRASH") !== -1) ? "var(--red)" : "#a1a1aa";
+                    const logColor = (a.indexOf("ERROR") !== -1 || a.indexOf("FAILED") !== -1) ? "var(--red)" : "#a1a1aa";
                     html += '<div style="padding:5px 0; border-bottom:1px solid #1f2937; color:'+logColor+';">'+a+'</div>';
                 }
                 logsContainer.innerHTML = html;
@@ -564,7 +578,6 @@ def home():
         }
     }
 
-    // Force an immediate fetch on load, then every 3 seconds
     setTimeout(fetchData, 100);
     setInterval(fetchData, 3000);
 </script>
